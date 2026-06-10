@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.zehntage-gnome"
+          path="/org/gnome/shell/extensions/zehntage-gnome/">
+    <key name="api-key" type="s">
+      <default>''</default>
+      <summary>Gemini API key</summary>
+    </key>
+    <key name="model" type="s">
+      <default>'gemini-3.1-flash-lite'</default>
+      <summary>Gemini model</summary>
+    </key>
+    <key name="capture-hotkey" type="as">
+      <default><![CDATA[['<Super><Shift>g']]]></default>
+      <summary>Hotkey that starts a capture</summary>
+    </key>
+    <key name="prompt" type="s">
+      <default>'The attached image is a fragment of the user\'s screen. The red ring marks the point the user is interested in. Concisely explain what is shown there and what it means; focus on the marked point but use the rest of the image as context. The user is a native Russian speaker, fluent in English, learning German. Answer in Russian. If the marked content is a German word or phrase, translate and briefly explain it.'</default>
+      <summary>Prompt sent with every screenshot</summary>
+    </key>
+    <key name="history-size" type="i">
+      <default>20</default>
+      <range min="1" max="200"/>
+      <summary>Maximum number of history entries</summary>
+    </key>
+    <key name="marker-size" type="i">
+      <default>40</default>
+      <range min="16" max="128"/>
+      <summary>Diameter of the red marker ring, px</summary>
+    </key>
+  </schema>
+</schemalist>

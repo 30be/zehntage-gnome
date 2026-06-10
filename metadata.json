@@ -1,0 +1,9 @@
+{
+    "uuid": "zehntage-gnome@lyka",
+    "name": "Zehntage",
+    "description": "Context-aware screen assistant: hotkey → native screenshot UI with a red marker at the cursor → Gemini explains what you see, in a top-bar popup with history and follow-ups.",
+    "shell-version": ["50"],
+    "settings-schema": "org.gnome.shell.extensions.zehntage-gnome",
+    "url": "https://github.com/lyka/zehntage-gnome",
+    "version-name": "1.0"
+}
