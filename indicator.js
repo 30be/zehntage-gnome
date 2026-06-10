@@ -11,6 +11,16 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 /** Minimal Markdown → Pango markup converter (defensive). */
+export function stripMd(text) {
+    return text
+        .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+        .replace(/__([^_\n]+)__/g, '$1')
+        .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1$2')
+        .replace(/(^|[^_\w])_([^_\n]+)_(?!\w)/g, '$1$2')
+        .replace(/`([^`\n]+)`/g, '$1')
+        .replace(/^#{1,6}\s+/, '');
+}
+
 export function mdToPango(text) {
     let s = GLib.markup_escape_text(text, -1);
     // Inline code first, so its contents are not styled further.
@@ -187,7 +197,7 @@ class ZehntageIndicator extends PanelMenu.Button {
             ? `⚠ ${entry.error ?? 'Error'}`
             : entry.status === 'pending'
                 ? 'Thinking…'
-                : (entry.turns[0]?.answer ?? '').split('\n')[0];
+                : stripMd((entry.turns[0]?.answer ?? '').split('\n')[0]);
         const label = new St.Label({
             text: first,
             style_class: 'zehntage-collapsed-label',
