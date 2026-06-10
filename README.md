@@ -1,9 +1,10 @@
 # zehntage-gnome
 
 Context-aware screen assistant for GNOME Shell 50. Press the hotkey — the
-native screenshot UI opens with a red ring marking where your cursor was —
-select an area, and Gemini explains what's there. Answers live in a top-bar
-popup with history and follow-up questions.
+whole screen is captured instantly with a red ring marking where your cursor
+was, and Gemini explains what's there. Answers live in a top-bar popup with
+history and follow-up questions. (Optionally, the native interactive
+area-selection UI can be used instead — see Settings.)
 
 ## Install
 
@@ -26,13 +27,16 @@ On Wayland the extension fully activates after re-login.
   bullets).
 - Newest answer is expanded; type into "follow-up…" and press Enter to
   continue the conversation about that screenshot.
+- Click a screenshot preview to open the PNG in your image viewer.
 
 ## Settings
 
 `gnome-extensions prefs zehntage-gnome@lyka` — Gemini API key
 (aistudio.google.com), model (default `gemini-3.1-flash-lite`), prompt,
-hotkey, history size (default 20), marker size. The gear button in the
-panel menu opens the same dialog. Hotkey example via CLI:
+hotkey, history size (default 20), marker size, marker glow (px, default
+10), and "Interactive capture (area selection)" (default off — full-screen
+capture without any UI). The gear button in the panel menu opens the same
+dialog. Hotkey example via CLI:
 
 ```nu
 gsettings --schemadir ~/.local/share/gnome-shell/extensions/zehntage-gnome@lyka/schemas set org.gnome.shell.extensions.zehntage-gnome capture-hotkey "['XF86Favorites']"

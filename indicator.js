@@ -173,14 +173,31 @@ class ZehntageIndicator extends PanelMenu.Button {
         this._historySection.addMenuItem(item);
     }
 
-    _thumbnail(entry, size) {
-        return new St.Icon({
-            gicon: new Gio.FileIcon({
-                file: Gio.File.new_for_path(entry.imagePath),
-            }),
-            icon_size: size,
+    /** Aspect-correct thumbnail; clicking opens the PNG in the viewer. */
+    _thumbnail(entry, width, height, clickable = true) {
+        const file = Gio.File.new_for_path(entry.imagePath);
+        const image = new St.Widget({
             style_class: 'zehntage-thumb',
+            width,
+            height,
+            style: `background-image: url("${file.get_uri()}");`,
         });
+        if (!clickable)
+            return image;
+        const button = new St.Button({
+            child: image,
+            style_class: 'zehntage-thumb-button',
+            x_align: Clutter.ActorAlign.START,
+        });
+        button.connect('clicked', () => {
+            this.menu.close();
+            try {
+                Gio.AppInfo.launch_default_for_uri(file.get_uri(), null);
+            } catch (e) {
+                console.error(`zehntage-gnome: failed to open image: ${e}`);
+            }
+        });
+        return button;
     }
 
     _renderEntry(entry) {
@@ -192,7 +209,7 @@ class ZehntageIndicator extends PanelMenu.Button {
 
     _renderCollapsed(entry) {
         const item = new PopupMenu.PopupBaseMenuItem();
-        item.add_child(this._thumbnail(entry, 32));
+        item.add_child(this._thumbnail(entry, 48, 32, false));
         const first = entry.status === 'error'
             ? `⚠ ${entry.error ?? 'Error'}`
             : entry.status === 'pending'
@@ -221,7 +238,7 @@ class ZehntageIndicator extends PanelMenu.Button {
             style_class: 'zehntage-entry',
         });
 
-        box.add_child(this._thumbnail(entry, 96));
+        box.add_child(this._thumbnail(entry, 320, 140));
 
         if (entry.status === 'pending') {
             box.add_child(wrappedLabel('Thinking…', 'zehntage-pending'));

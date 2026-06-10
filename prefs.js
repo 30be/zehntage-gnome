@@ -87,5 +87,24 @@ export default class ZehntagePreferences extends ExtensionPreferences {
         settings.bind('marker-size', markerRow, 'value',
             Gio.SettingsBindFlags.DEFAULT);
         behaviourGroup.add(markerRow);
+
+        const glowRow = new Adw.SpinRow({
+            title: 'Marker glow (px)',
+            subtitle: 'Blur radius of the red ring’s glow',
+            adjustment: new Gtk.Adjustment({
+                lower: 0, upper: 64, step_increment: 1,
+            }),
+        });
+        settings.bind('marker-glow', glowRow, 'value',
+            Gio.SettingsBindFlags.DEFAULT);
+        behaviourGroup.add(glowRow);
+
+        const interactiveRow = new Adw.SwitchRow({
+            title: 'Interactive capture (area selection)',
+            subtitle: 'Off: capture the whole screen instantly',
+        });
+        settings.bind('interactive-capture', interactiveRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        behaviourGroup.add(interactiveRow);
     }
 }

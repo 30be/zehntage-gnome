@@ -28,5 +28,14 @@
       <range min="16" max="128"/>
       <summary>Diameter of the red marker ring, px</summary>
     </key>
+    <key name="marker-glow" type="i">
+      <default>10</default>
+      <range min="0" max="64"/>
+      <summary>Glow (box-shadow blur) of the red marker ring, px</summary>
+    </key>
+    <key name="interactive-capture" type="b">
+      <default>false</default>
+      <summary>Open the interactive area-selection UI instead of capturing the full screen</summary>
+    </key>
   </schema>
 </schemalist>
