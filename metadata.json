@@ -5,5 +5,5 @@
     "shell-version": ["50"],
     "settings-schema": "org.gnome.shell.extensions.zehntage-gnome",
     "url": "https://github.com/lyka/zehntage-gnome",
-    "version-name": "1.0"
+    "version-name": "1.1"
 }

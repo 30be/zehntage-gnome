@@ -2,6 +2,7 @@
 
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Pango from 'gi://Pango';
 import St from 'gi://St';
@@ -9,11 +10,40 @@ import St from 'gi://St';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
-function wrappedLabel(text, styleClass) {
+/** Minimal Markdown → Pango markup converter (defensive). */
+export function mdToPango(text) {
+    let s = GLib.markup_escape_text(text, -1);
+    // Inline code first, so its contents are not styled further.
+    s = s.replace(/`([^`\n]+)`/g, '<tt>$1</tt>');
+    // Bold: **x** or __x__
+    s = s.replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
+    s = s.replace(/__([^_\n]+)__/g, '<b>$1</b>');
+    // Italic: *x* or _x_ (single markers)
+    s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<i>$2</i>');
+    s = s.replace(/(^|[^_\w])_([^_\n]+)_(?!\w)/g, '$1<i>$2</i>');
+    // Headers and bullets, per line.
+    s = s.split('\n').map(line => {
+        const h = line.match(/^#{1,6}\s+(.*)$/);
+        if (h)
+            return `<b>${h[1]}</b>`;
+        return line.replace(/^(\s*)[-*]\s+/, '$1• ');
+    }).join('\n');
+    return s;
+}
+
+function wrappedLabel(text, styleClass, markdown = false) {
     const label = new St.Label({text, style_class: styleClass});
     label.clutter_text.line_wrap = true;
     label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
     label.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+    if (markdown) {
+        try {
+            label.clutter_text.set_markup(mdToPango(text));
+        } catch (e) {
+            console.warn(`zehntage-gnome: markup failed: ${e}`);
+            label.clutter_text.set_text(text);
+        }
+    }
     return label;
 }
 
@@ -38,6 +68,20 @@ class ZehntageIndicator extends PanelMenu.Button {
         const captureItem = new PopupMenu.PopupImageMenuItem(
             'Capture & explain', 'camera-photo-symbolic');
         captureItem.connect('activate', () => this._cb.onCapture());
+        const prefsButton = new St.Button({
+            child: new St.Icon({
+                icon_name: 'emblem-system-symbolic',
+                icon_size: 16,
+            }),
+            style_class: 'button zehntage-prefs-button',
+            x_align: Clutter.ActorAlign.END,
+            x_expand: true,
+        });
+        prefsButton.connect('clicked', () => {
+            this.menu.close();
+            this._cb.onOpenPrefs();
+        });
+        captureItem.add_child(prefsButton);
         this.menu.addMenuItem(captureItem);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
@@ -189,7 +233,7 @@ class ZehntageIndicator extends PanelMenu.Button {
                 }
                 if (turn.answer) {
                     box.add_child(wrappedLabel(
-                        turn.answer, 'zehntage-answer'));
+                        turn.answer, 'zehntage-answer', true));
                 }
             }
             if (entry.followUpPending)

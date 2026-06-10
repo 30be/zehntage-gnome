@@ -18,8 +18,12 @@ On Wayland the extension fully activates after re-login.
 
 ## Usage
 
-- Hotkey: `<Super><Shift>G` (configurable) — capture & explain.
-- Panel camera icon → history popup; "Capture & explain" menu item.
+- Hotkey: `<Super><Shift>G` (configurable; any accelerator works, e.g.
+  `XF86Favorites`) — capture & explain.
+- Panel camera icon → history popup; "Capture & explain" menu item, gear
+  button in the same row opens settings.
+- Answers render basic Markdown (**bold**, *italic*, `code`, headers,
+  bullets).
 - Newest answer is expanded; type into "follow-up…" and press Enter to
   continue the conversation about that screenshot.
 
@@ -27,7 +31,12 @@ On Wayland the extension fully activates after re-login.
 
 `gnome-extensions prefs zehntage-gnome@lyka` — Gemini API key
 (aistudio.google.com), model (default `gemini-3.1-flash-lite`), prompt,
-hotkey, history size (default 20), marker size.
+hotkey, history size (default 20), marker size. The gear button in the
+panel menu opens the same dialog. Hotkey example via CLI:
+
+```nu
+gsettings --schemadir ~/.local/share/gnome-shell/extensions/zehntage-gnome@lyka/schemas set org.gnome.shell.extensions.zehntage-gnome capture-hotkey "['XF86Favorites']"
+```
 
 History is stored in `~/.local/share/zehntage-gnome@lyka/` (history.json +
 PNG copies; oldest entries and their PNGs are evicted past the cap).
