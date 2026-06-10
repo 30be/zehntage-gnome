@@ -41,15 +41,23 @@ gsettings --schemadir ~/.local/share/gnome-shell/extensions/zehntage-gnome@lyka/
 History is stored in `~/.local/share/zehntage-gnome@lyka/` (history.json +
 PNG copies; oldest entries and their PNGs are evicted past the cap).
 
-## Testing in a nested session
+## Development: iterate without relogin
+
+`gnome-shell --nested` was removed in GNOME 50; its replacement is
+`--devkit` — a full shell running in a window inside your session, which
+loads extensions fresh on every launch. `./dev.sh` packs, installs, and
+starts it in one go:
 
 ```nu
-$env.MUTTER_DEBUG_DUMMY_MODE_SPECS = "1280x720"
-dbus-run-session -- gnome-shell --nested --wayland
+./dev.sh
 ```
 
-The nested shell picks up the installed extension; check stderr for
-`zehntage` errors. Headless alternative:
+The devkit shell shares your extension dir and dconf, so the API key and
+`enabled-extensions` are already in place; load errors appear on stderr.
+Close the window, edit, re-run. A relogin is only needed to roll a new
+version into the *real* session.
+
+Headless smoke test (logs only):
 
 ```nu
 dbus-run-session -- gnome-shell --headless --wayland --virtual-monitor 1280x720
