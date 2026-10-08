@@ -86,6 +86,10 @@ export class History {
                     entry.error = 'Interrupted';
                 }
                 delete entry.followUpPending;
+                delete entry.partial;
+                delete entry.partialFollowUp;
+                delete entry.upgradePending;
+                delete entry.partialUpgrade;
             }
             return list;
         } catch {

@@ -7,8 +7,8 @@
         <choice value="cli"/>
         <choice value="api"/>
       </choices>
-      <default>'cli'</default>
-      <summary>cli: local Claude Code login (claude -p); api: API key</summary>
+      <default>'api'</default>
+      <summary>api: API key (fastest); cli: local Claude Code login (claude -p)</summary>
     </key>
     <key name="claude-path" type="s">
       <default>'claude'</default>
@@ -37,6 +37,29 @@
       </choices>
       <default>'low'</default>
       <summary>Thinking effort (output_config.effort)</summary>
+    </key>
+    <key name="stream" type="b">
+      <default>true</default>
+      <summary>API backend: stream the answer as it is written</summary>
+    </key>
+    <key name="thinking" type="b">
+      <default>false</default>
+      <summary>API backend: let the model think (about 0.4 s slower)</summary>
+    </key>
+    <key name="strong-model" type="s">
+      <default>'claude-opus-5-5'</default>
+      <summary>Model behind the [Opus] button (re-asks and replaces)</summary>
+    </key>
+    <key name="strong-effort" type="s">
+      <choices>
+        <choice value="low"/>
+        <choice value="medium"/>
+        <choice value="high"/>
+        <choice value="xhigh"/>
+        <choice value="max"/>
+      </choices>
+      <default>'high'</default>
+      <summary>Effort for the [Opus] button (thinking always on)</summary>
     </key>
     <key name="api-base-url" type="s">
       <default>'https://api.anthropic.com'</default>

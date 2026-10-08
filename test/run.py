@@ -113,11 +113,20 @@ class Mock:
     answer: Callable | None = None   # callable(n, body) -> text
     status: Callable | None = None   # callable(n) -> http status
     delay = 0.0          # seconds before answering
+    gets: list = []      # GET paths (connection warm-up)
+    chunks = 3           # text deltas per answer when streaming
+    chunk_delay = 0.0    # seconds between deltas
+    stream_error = False # send an SSE error event mid-answer
 
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A002 (silence logging)
         pass
+
+    def do_GET(self):   # connection warm-up (model metadata)
+        Mock.gets.append(self.path)
+        self._send(200, {'id': self.path.rsplit('/', 1)[-1],
+                         'type': 'model'})
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
@@ -133,21 +142,67 @@ class Handler(BaseHTTPRequestHandler):
                 'type': 'authentication_error',
                 'message': 'invalid x-api-key'}})
         if mode == 'refusal':
-            return self._send(200, {
-                'type': 'message', 'role': 'assistant', 'content': [],
-                'stop_reason': 'refusal', 'model': body['model']})
+            return self._stream(body, [], 'refusal')
         if Mock.answer:
             text = Mock.answer(n, body)
+        elif 'opus' in body['model']:
+            text = f'**Opus** {n}'
         else:
             text = ANSWER if n == 1 or mode != 'ok' else f'Antwort {n}'
+        blocks = []
+        if body.get('thinking', {}).get('type') != 'disabled':
+            blocks.append({'type': 'thinking', 'thinking': '',
+                           'signature': f'sig{n}'})
+        blocks.append({'type': 'text', 'text': text})
+        if body.get('stream'):
+            return self._stream(body, blocks, 'end_turn')
         self._send(200, {
             'id': f'msg_{n}', 'type': 'message', 'role': 'assistant',
             'model': body['model'], 'stop_reason': 'end_turn',
-            'content': [
-                {'type': 'thinking', 'thinking': '', 'signature': f'sig{n}'},
-                {'type': 'text', 'text': text},
-            ],
+            'content': blocks,
             'usage': {'input_tokens': 10, 'output_tokens': 5}})
+
+    def _stream(self, body, blocks, stop):
+        """Real-API-shaped SSE; text arrives in Mock.chunks pieces."""
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.end_headers()
+
+        def ev(obj):
+            self.wfile.write(f"event: {obj['type']}\ndata: "
+                             f"{json.dumps(obj)}\n\n".encode())
+            self.wfile.flush()
+        ev({'type': 'message_start', 'message': {
+            'id': 'msg', 'type': 'message', 'role': 'assistant',
+            'model': body['model'], 'content': [],
+            'usage': {'input_tokens': 10, 'output_tokens': 1}}})
+        ev({'type': 'ping'})
+        for i, b in enumerate(blocks):
+            if b['type'] == 'thinking':
+                ev({'type': 'content_block_start', 'index': i,
+                    'content_block': {'type': 'thinking', 'thinking': '',
+                                      'signature': ''}})
+                ev({'type': 'content_block_delta', 'index': i, 'delta': {
+                    'type': 'signature_delta', 'signature': b['signature']}})
+            else:
+                ev({'type': 'content_block_start', 'index': i,
+                    'content_block': {'type': 'text', 'text': ''}})
+                text = b['text']
+                k = max(1, -(-len(text) // Mock.chunks))
+                for j in range(0, len(text), k):
+                    if j and Mock.chunk_delay:
+                        time.sleep(Mock.chunk_delay)
+                    if Mock.stream_error and j:
+                        ev({'type': 'error', 'error': {
+                            'type': 'overloaded_error',
+                            'message': 'Overloaded'}})
+                        return
+                    ev({'type': 'content_block_delta', 'index': i, 'delta': {
+                        'type': 'text_delta', 'text': text[j:j + k]}})
+            ev({'type': 'content_block_stop', 'index': i})
+        ev({'type': 'message_delta', 'delta': {'stop_reason': stop},
+            'usage': {'output_tokens': 5}})
+        ev({'type': 'message_stop'})
 
     def _send(self, status, obj):
         data = json.dumps(obj).encode()
@@ -202,7 +257,7 @@ class Shell:
         env.pop('DISPLAY', None)
         self.log = open(self.tmp / 'shell.log', 'w')
         self.proc = subprocess.Popen(
-            ['gnome-shell', '--headless', '--wayland', '--no-x11',
+            ['gnome-shell', '--headless', '--wayland',   # Xwayland on demand
              '--wayland-display', display,
              *[a for w, h, _ in SCREENS
                for a in ('--virtual-monitor', f'{w}x{h}')]],
@@ -328,9 +383,12 @@ class Shell:
 # --------------------------------------------------------------- helpers
 
 def png_size(b64):
+    """Image size of a base64 PNG or JPEG."""
     raw = base64.b64decode(b64)
-    assert raw[:8] == b'\x89PNG\r\n\x1a\n', 'not a PNG'
-    return struct.unpack('>II', raw[16:24])
+    if raw[:8] == b'\x89PNG\r\n\x1a\n':
+        return struct.unpack('>II', raw[16:24])
+    w, h, _ = decode_png(b64)
+    return w, h
 
 
 def decode_png(b64):
@@ -486,10 +544,14 @@ def reset(sh):
           f'leaked modal/overlay from previous scenario: {m}')
     Mock.mode = 'ok'
     Mock.answer = Mock.status = None
-    Mock.delay = 0.0
+    Mock.delay = Mock.chunk_delay = 0.0
+    Mock.chunks = 3
+    Mock.stream_error = False
     Mock.requests.clear()
+    Mock.gets.clear()
     for key in ('history-size', 'effort', 'model', 'cli-timeout',
-                'capture-hotkey'):
+                'capture-hotkey', 'thinking', 'stream', 'strong-model',
+                'strong-effort'):
         subprocess.run(['gsettings', '--schemadir', str(sh.schemadir),
                         'reset', SCHEMA, key], check=True)
     sh.gset('backend', "'api'")
@@ -597,6 +659,8 @@ def t_click_captures_full_screen(sh):
 
 
 def t_followup_typed_is_append_only(sh):
+    sh.gset('thinking', 'true')   # so there are thinking blocks to replay
+    time.sleep(0.2)
     hotkey(sh)
     wait_state(sh, lambda s: s['selector'])
     sh.js('await zt.drag(100, 100, 400, 300);')
@@ -1434,29 +1498,451 @@ def t_light_and_dark_theme_screenshots(sh):
     sh.gset('color-scheme', "'default'", 'org.gnome.desktop.interface')
 
 
+# ----- speed: streaming, thinking, warm-up
+
+def t_request_is_tuned_for_speed(sh):
+    capture(sh, 100, 100, 200, 200)
+    b = Mock.requests[0]['body']
+    check(b['stream'] is True, 'request must stream')
+    check(b.get('thinking') == {'type': 'disabled'},
+          f'thinking should be off by default: {b.get("thinking")}')
+    check(b['output_config'] == {'effort': 'low'}, b['output_config'])
+
+
+def t_thinking_switch_on(sh):
+    sh.gset('thinking', 'true')
+    time.sleep(0.2)
+    capture(sh, 100, 100, 200, 200)
+    b = Mock.requests[0]['body']
+    check('thinking' not in b, f'thinking on = adaptive default: {b}')
+
+
+def t_warmup_connection_on_hotkey(sh):
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    end = time.time() + 2
+    while not Mock.gets and time.time() < end:
+        time.sleep(0.05)
+    check(Mock.gets == ['/v1/models/claude-haiku-5-5'],
+          f'no warm-up request while selecting: {Mock.gets}')
+    check(not Mock.requests, 'warm-up must not create a message')
+    sh.js('await zt.chord(zt.Clutter.KEY_Escape);')
+
+
+def t_no_warmup_for_cli_backend(sh):
+    use_cli(sh)
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    time.sleep(0.5)
+    check(not Mock.gets, f'cli backend must not touch the API: {Mock.gets}')
+    sh.js('await zt.chord(zt.Clutter.KEY_Escape);')
+
+
+def t_streaming_shows_partial_answer(sh):
+    Mock.answer = lambda n, b: 'ERSTER TEIL zweiter teil DRITTER TEIL'
+    Mock.chunks = 3
+    Mock.chunk_delay = 0.8
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    end = time.time() + 5
+    text = ''
+    while time.time() < end:
+        text = menu_text(sh)
+        if 'ERSTER' in text:
+            break
+        time.sleep(0.05)
+    check('ERSTER' in text and 'DRITTER' not in text,
+          f'no partial answer while streaming: {text!r}')
+    check(state(sh)['status'] == 'pending', 'should still be pending')
+    shot(sh, 'streaming.png')
+    s = wait_state(sh, lambda s: s['status'] == 'ok', timeout=8)
+    check(s['turns'][0]['answer'] == 'ERSTER TEIL zweiter teil DRITTER TEIL',
+          s['turns'])
+    check('DRITTER' in menu_text(sh), 'final answer not shown')
+
+
+def t_streaming_followup_partial(sh):
+    capture(sh, 100, 100, 200, 200)
+    Mock.answer = lambda n, b: 'FOLGE eins FOLGE zwei'
+    Mock.chunks = 2
+    Mock.chunk_delay = 0.8
+    sh.js("await zt.type('und?'); await zt.chord(zt.Clutter.KEY_Return);")
+    end = time.time() + 5
+    while 'FOLGE eins' not in menu_text(sh) and time.time() < end:
+        time.sleep(0.05)
+    text = menu_text(sh)
+    check('FOLGE eins' in text and 'FOLGE zwei' not in text, text)
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2, timeout=8)
+
+
+def t_stream_error_event_is_shown(sh):
+    Mock.stream_error = True
+    s = capture(sh, 100, 100, 200, 200)
+    check(s['status'] == 'error' and 'Overloaded' in s['error'], s)
+
+
+def t_large_capture_sent_as_jpeg(sh):
+    """A detailed full screen is >300 KB as PNG: must go out as JPEG."""
+    gi.require_version('GdkPixbuf', '2.0')
+    from gi.repository import GdkPixbuf
+    sw, shh = stage_size(sh)
+    w, h = px(sh, sw, shh)
+    noise = Path(os.environ['ZT_TMP']) / 'noise2.png'
+    GdkPixbuf.Pixbuf.new_from_bytes(
+        GLib.Bytes.new(os.urandom(w * h * 3)), GdkPixbuf.Colorspace.RGB,
+        False, 8, w, h, w * 3).savev(str(noise), 'png', [], [])
+    sh.js(f"""const b = new zt.St.Widget({{x: 0, y: 0, width: {sw},
+        height: {shh}, style: 'background-image: url("file://{noise}");'
+            + 'background-size: cover;'}});
+        zt.Main.layoutManager.uiGroup.insert_child_above(b,
+            zt.Main.layoutManager.panelBox);
+        (zt._boxes ??= []).push(b); await zt.sleep(300);""")
+    s = capture(sh, 100, 100, 700, 500)
+    check(s['status'] == 'ok', s)
+    src = last_image()['source']
+    check(src['media_type'] == 'image/jpeg', src['media_type'])
+    check(base64.b64decode(src['data'])[:2] == b'\xff\xd8', 'not JPEG bytes')
+
+
+def t_defaults_are_api_stream_no_thinking(sh):
+    for key in ('backend', 'stream', 'thinking', 'effort'):
+        subprocess.run(['gsettings', '--schemadir', str(sh.schemadir),
+                        'reset', SCHEMA, key], check=True)
+    time.sleep(0.2)
+    s = capture(sh, 100, 100, 200, 200)
+    check(s['status'] == 'ok', s)
+    check(len(Mock.requests) == 1 and not fake_calls(), 'default backend '
+          'must be the API')
+    b = Mock.requests[0]['body']
+    check(b['stream'] is True and b.get('thinking') == {'type': 'disabled'}
+          and b['output_config'] == {'effort': 'low'}, b)
+
+
+def t_stream_setting_off(sh):
+    sh.gset('stream', 'false')
+    time.sleep(0.2)
+    s = capture(sh, 100, 100, 200, 200)
+    check(s['status'] == 'ok' and s['turns'][0]['answer'] == ANSWER, s)
+    check(Mock.requests[0]['body']['stream'] is False, 'stream not off')
+    sh.js("await zt.type('und?'); await zt.chord(zt.Clutter.KEY_Return);")
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    check(Mock.requests[1]['body']['stream'] is False, 'follow-up streamed')
+
+
+# ----- real app windows (Wayland and X11 clients)
+
+APP = ROOT / 'test' / 'color-app.py'
+
+
+def cyan(rgb):
+    r, g, b = rgb
+    return r < 40 and g > 220 and b > 220
+
+
+class App:
+    """A real GTK client window; closed on exit."""
+
+    def __init__(self, sh, backend, *args):
+        self.sh = sh
+        env = dict(os.environ, GDK_BACKEND=backend, NO_AT_BRIDGE='1')
+        if backend == 'x11':
+            env['DISPLAY'] = sh.js("return zt.getenv('DISPLAY');")
+            # The test shell's Xwayland has its own auth cookie.
+            env['XAUTHORITY'] = sh.js("return zt.getenv('XAUTHORITY');")
+            env.pop('WAYLAND_DISPLAY', None)
+        self.log = Path(os.environ['ZT_TMP']) / 'app.log'
+        self.proc = subprocess.Popen([sys.executable, str(APP), *args],
+                                     env=env, stdout=subprocess.DEVNULL,
+                                     stderr=open(self.log, 'w'))
+        self.display = env.get('DISPLAY')
+
+    def __enter__(self):
+        try:
+            self._wait_window()
+        except RuntimeError as e:
+            tail = self.log.read_text(errors='replace')[-400:]
+            raise RuntimeError(f'app window never appeared (DISPLAY='
+                               f'{self.display}): {tail or e}') from None
+        time.sleep(1.0)   # first frames painted, any fullscreen settled
+        self.rect = self.sh.js("""
+            const w = global.display.list_all_windows()
+                .find(w => w.get_title() === 'zt-color');
+            const r = w.get_frame_rect();
+            return [r.x, r.y, r.width, r.height];""")
+        return self
+
+    def _wait_window(self):
+        self.sh.js("""
+            return await zt.waitFor(() => {
+                const w = global.display.list_all_windows()
+                    .find(w => w.get_title() === 'zt-color');
+                if (!w) return null;
+                const r = w.get_frame_rect();
+                return r.width > 50 ? [r.x, r.y, r.width, r.height] : null;
+            }, 15000);""", timeout=20)
+
+    def __exit__(self, *exc):
+        self.proc.terminate()
+        try:
+            self.proc.wait(5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+        self.sh.js("""await zt.waitFor(() => !global.display.list_all_windows()
+            .some(w => w.get_title() === 'zt-color'), 5000)
+            .catch(() => {});""")
+
+
+def _check_inset(sh, rect, pred, what, inset=20):
+    x, y, w, h = rect
+    capture(sh, x + inset, y + inset, x + w - inset, y + h - inset)
+    iw, ih, pix = decode_png(last_image()['source']['data'])
+    for px_, py_ in ((1, 1), (iw - 2, 1), (1, ih - 2), (iw - 2, ih - 2),
+                     (iw // 2, ih // 2)):
+        check(pred(pix(px_, py_)),
+              f'{what}: pixel {px_},{py_} = {pix(px_, py_)}')
+
+
+def t_capture_wayland_app_window(sh):
+    with App(sh, 'wayland') as app:
+        _check_inset(sh, app.rect, magenta, 'wayland window')
+        shot(sh, 'app-wayland.png')
+
+
+def t_capture_x11_app_window(sh):
+    with App(sh, 'x11') as app:
+        _check_inset(sh, app.rect, magenta, 'X11 (Xwayland) window')
+
+
+def t_capture_fullscreen_app(sh):
+    with App(sh, 'wayland', '--fullscreen') as app:
+        mon = sh.js('return (m => [m.x, m.y, m.width, m.height])'
+                    '(zt.Main.layoutManager.primaryMonitor);')
+        check(app.rect == mon, f'not fullscreen: {app.rect} vs {mon}')
+        _check_inset(sh, app.rect, magenta, 'fullscreen window', inset=60)
+
+
+def t_capture_open_app_menu(sh):
+    """Dropdown open in an app: must be in the frozen frame."""
+    with App(sh, 'wayland', '--menu') as app:
+        x, y, _, _ = app.rect
+        sh.js(f'await zt.click({x + 20}, {y + 15});')
+        menu = sh.js("""
+            return await zt.waitFor(() => {
+                const w = global.display.list_all_windows()
+                    .find(w => w.get_title() !== 'zt-color' &&
+                          w.get_frame_rect().width > 50 &&
+                          w.get_window_type() !== 0);
+                if (!w) return null;
+                const r = w.get_frame_rect();
+                return [r.x, r.y, r.width, r.height];
+            }, 5000);""")
+        time.sleep(0.5)
+        shot(sh, 'app-menu-open.png')
+        _check_inset(sh, menu, cyan, 'open dropdown menu', inset=10)
+        s = state(sh)
+        check(s['status'] == 'ok', s)
+
+
+def _upgrade(sh):
+    sh.js("""const b = (function find(a) {
+            if (a.style_class?.includes('zehntage-upgrade')) return a;
+            for (const c of a.get_children()) {
+                const r = find(c); if (r) return r;
+            }
+            return null;
+        })(zt.inst()._indicator.menu.box);
+        if (!b) throw new Error('no Opus button');
+        b.emit('clicked', 1);""")
+
+
+def t_opus_button_rewrites_answer(sh):
+    capture(sh, 100, 100, 200, 200)
+    label = sh.js("""return (function find(a) {
+            if (a.style_class?.includes('zehntage-upgrade')) return a.label;
+            for (const c of a.get_children()) {
+                const r = find(c); if (r) return r;
+            }
+            return null;
+        })(zt.inst()._indicator.menu.box);""")
+    check(label == 'Opus 5.5', f'button label: {label!r}')
+    _upgrade(sh)
+    s = wait_state(sh, lambda s: s['turns'] and
+                   s['turns'][0].get('model'), timeout=8)
+    b = Mock.requests[1]['body']
+    check(b['model'] == 'claude-opus-5-5', b['model'])
+    check(b['output_config'] == {'effort': 'high'}, b['output_config'])
+    check('thinking' not in b, 'Opus 5.5: thinking must stay adaptive')
+    check(b['max_tokens'] >= 16000, b['max_tokens'])
+    check(len(b['messages']) == 1 and
+          b['messages'][0]['content'][0]['type'] == 'image', b['messages'])
+    check(len(s['turns']) == 1 and s['turns'][0]['answer'] == '**Opus** 2',
+          s['turns'])
+    text = menu_text(sh)
+    check('Opus 2' in text and 'белка' not in text, 'Haiku answer not replaced')
+    check('— Opus 5.5' in text, 'no model tag')
+    shot(sh, 'opus-rewrite.png')
+    # Follow-up goes back to Haiku; Opus' blocks replayed as text only.
+    sh.js("zt.inst()._indicator._focusTarget?.grab_key_focus(); "
+          "await zt.type('und?'); await zt.chord(zt.Clutter.KEY_Return);")
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    b = Mock.requests[2]['body']
+    check(b['model'] == 'claude-haiku-5-5', b['model'])
+    check(b['messages'][1]['content'] == [{'type': 'text',
+                                           'text': '**Opus** 2'}],
+          b['messages'][1])
+
+
+def t_opus_rewrites_last_followup(sh):
+    capture(sh, 100, 100, 200, 200)
+    sh.js("await zt.type('Plural?'); await zt.chord(zt.Clutter.KEY_Return);")
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    _upgrade(sh)
+    s = wait_state(sh, lambda s: s['turns'][-1].get('model'), timeout=8)
+    msgs = Mock.requests[2]['body']['messages']
+    check([m['role'] for m in msgs] == ['user', 'assistant', 'user'] and
+          msgs[2]['content'] == 'Plural?', msgs)
+    check(s['turns'][0]['answer'] == ANSWER and
+          s['turns'][1] == {'question': 'Plural?', 'answer': '**Opus** 3',
+                            'content': s['turns'][1]['content'],
+                            'model': 'claude-opus-5-5'}, s['turns'])
+
+
+def t_opus_after_haiku_error(sh):
+    Mock.status = lambda n: 401 if n == 1 else 200
+    s = capture(sh, 100, 100, 200, 200)
+    check(s['status'] == 'error', s)
+    _upgrade(sh)
+    s = wait_state(sh, lambda s: s['status'] == 'ok', timeout=8)
+    check(Mock.requests[1]['body']['model'] == 'claude-opus-5-5', 'model')
+    check(s['turns'][0]['model'] == 'claude-opus-5-5', s['turns'])
+
+
+def t_opus_failure_keeps_haiku_answer(sh):
+    Mock.status = lambda n: 529 if n == 2 else 200
+    capture(sh, 100, 100, 200, 200)
+    _upgrade(sh)
+    end = time.time() + 6
+    err = None
+    while time.time() < end and not err:
+        err = sh.js('return zt.inst()._history.entries[0].upgradeError '
+                    '?? null;')
+        time.sleep(0.1)
+    check(err and '529' in err, f'no upgrade error: {err}')
+    s = state(sh)
+    check(s['turns'][0]['answer'] == ANSWER and
+          'model' not in s['turns'][0], 'Haiku answer lost')
+    check('529' in menu_text(sh), 'upgrade error not shown')
+
+
+def t_opus_streams_live(sh):
+    capture(sh, 100, 100, 200, 200)
+    Mock.answer = lambda n, b: 'OPUSTEIL eins OPUSTEIL zwei'
+    Mock.chunks = 2
+    Mock.chunk_delay = 0.8
+    _upgrade(sh)
+    end = time.time() + 5
+    while 'OPUSTEIL eins' not in menu_text(sh) and time.time() < end:
+        time.sleep(0.05)
+    text = menu_text(sh)
+    check('OPUSTEIL eins' in text and 'OPUSTEIL zwei' not in text and
+          'белка' not in text, text)
+    wait_state(sh, lambda s: s['turns'][0].get('model'), timeout=8)
+
+
+def t_opus_blocks_followup_while_running(sh):
+    capture(sh, 100, 100, 200, 200)
+    Mock.delay = 1.5
+    _upgrade(sh)
+    time.sleep(0.3)
+    sh.js("zt.inst()._indicator._focusTarget?.grab_key_focus(); "
+          "await zt.type('warte'); await zt.chord(zt.Clutter.KEY_Return);")
+    wait_state(sh, lambda s: s['turns'][0].get('model'), timeout=8)
+    time.sleep(0.3)
+    check(len(Mock.requests) == 2, 'follow-up sent during the Opus rewrite')
+
+
+def t_opus_with_cli_backend(sh):
+    use_cli(sh)
+    capture(sh, 100, 100, 200, 200)
+    _upgrade(sh)
+    s = wait_state(sh, lambda s: s['turns'] and
+                   s['turns'][0].get('model'), timeout=8)
+    argv = fake_calls()[1]['argv']
+    check(argval(argv, '--model') == 'claude-opus-5-5' and
+          argval(argv, '--effort') == 'high', argv)
+    check(not Mock.requests, 'cli entry must not use the API')
+
+
+def t_model_name_labels(sh):
+    names = sh.js("""return import('file://' + zt.ext().path + '/indicator.js')
+        .then(m => ['claude-opus-5-5', 'claude-haiku-5-5', 'claude-fable-5-1',
+                    'claude-sonnet-5', 'weird'].map(m.modelName));""")
+    check(names == ['Opus 5.5', 'Haiku 5.5', 'Fable 5.1', 'Sonnet 5',
+                    'weird'], names)
+
+
 SCENARIOS = [v for k, v in list(globals().items()) if k.startswith('t_')]
 
 
 def t_live(sh):
-    """Real request to the Claude API with the fixture word."""
-    fx = sh.js("return zt.fixture('Das Eichhörnchen frisst Nüsse');")
-    hotkey(sh)
-    wait_state(sh, lambda s: s['selector'])
-    x, y, w, h = fx
-    sh.js(f'await zt.drag({x - 10}, {y - 10}, {x + w + 10}, {y + h + 10});')
-    s = wait_state(sh, lambda s: s['status'] in ('ok', 'error'), timeout=60)
-    print('    live status:', s['status'], s['error'] or '')
-    if s['turns']:
-        print('    answer:', s['turns'][0]['answer'])
+    """Real Claude API: time to first visible words and to the full answer."""
+    first_t, total_t = [], []
+    for i in range(3):
+        reset(sh)
+        fx = sh.js("return zt.fixture('Das Eichhörnchen frisst Nüsse');")
+        hotkey(sh)
+        wait_state(sh, lambda s: s['selector'])
+        x, y, w, h = fx
+        sh.js(f'await zt.drag({x - 10}, {y - 10}, '
+              f'{x + w + 10}, {y + h + 10});')
+        t0 = time.time()
+        first = None
+        while time.time() - t0 < 30:
+            st = sh.js('const e = zt.inst()._history.entries[0]; '
+                       'return [e?.status, !!e?.partial];')
+            if first is None and (st[1] or st[0] == 'ok'):
+                first = time.time() - t0
+            if st[0] in ('ok', 'error'):
+                break
+            time.sleep(0.02)
+        total = time.time() - t0
+        s = state(sh)
+        check(s['status'] == 'ok', s['error'])
+        check('белк' in s['turns'][0]['answer'].lower(), s['turns'][0])
+        first_t.append(first)
+        total_t.append(total)
+        print(f'    run {i + 1}: first words {first:.2f}s, done {total:.2f}s'
+              f'  {s["turns"][0]["answer"][:60]!r}')
     shot(sh, 'live.png')
-    check(s['status'] == 'ok', s['error'])
+    t0 = time.time()
     sh.js("await zt.type('Wie ist der Plural?'); "
           "await zt.chord(zt.Clutter.KEY_Return);")
     s = wait_state(sh, lambda s: len(s['turns'] or []) == 2 or
                    s['followUpError'], timeout=60)
     check(not s['followUpError'], s['followUpError'])
-    print('    follow-up:', s['turns'][1]['answer'])
+    print(f'    follow-up: {time.time() - t0:.2f}s  '
+          f'{s["turns"][1]["answer"][:60]!r}')
     shot(sh, 'live-followup.png')
+    # [Opus] rewrite of the last answer, real Opus 5.5 at high effort.
+    t0 = time.time()
+    _upgrade(sh)
+    first = None
+    while time.time() - t0 < 120:
+        st = sh.js('const e = zt.inst()._history.entries[0]; '
+                   'return [!!e.partialUpgrade, !!e.upgradePending, '
+                   'e.upgradeError ?? null];')
+        if first is None and st[0]:
+            first = time.time() - t0
+        if not st[1]:
+            break
+        time.sleep(0.05)
+    check(not st[2], st[2])
+    s = state(sh)
+    check(s['turns'][-1].get('model') == 'claude-opus-5-5', s['turns'][-1])
+    print(f'    Opus rewrite: first words {first or 0:.2f}s, done '
+          f'{time.time() - t0:.2f}s  {s["turns"][-1]["answer"][:70]!r}')
+    shot(sh, 'live-opus.png')
 
 
 def t_live_cli(sh):
@@ -1523,6 +2009,7 @@ def main():
         if not key:
             print('--live needs ANTHROPIC_API_KEY'); sys.exit(2)
         settings = {'claude-api-key': f"'{key}'", 'backend': "'api'"}
+        os.environ.pop('ANTHROPIC_API_KEY', None)
         scenarios = [t_loads, t_live]
     else:
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)

@@ -41,7 +41,7 @@ export class CliClient {
      *   turns: [{question?, answer}], question?}
      * @returns {Promise<{text: string}>}
      */
-    async send({model, system, image, turns, question}) {
+    async send({model, system, image, turns, question, effort}) {
         const bin = this._binary;
         if (!bin)
             throw new Error('claude CLI not found');
@@ -72,7 +72,7 @@ export class CliClient {
         const proc = launcher.spawnv([bin, '-p',
             '--safe-mode',
             '--model', model,
-            '--effort', this._settings.get_string('effort'),
+            '--effort', effort ?? this._settings.get_string('effort'),
             '--tools', '',
             '--strict-mcp-config',
             '--no-session-persistence',

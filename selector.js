@@ -18,6 +18,9 @@ const CLICK_SLOP = 4;           // px; smaller drags count as a click
 const MIN_THIN = 24;            // px; a thin drag (underlining) grows to this
 const MAX_EDGE = 1568;          // the API downsizes past this anyway, px
 const MAX_BYTES = 3_700_000;    // 5 MB API limit applies to the base64 text
+// Bigger PNGs go out as JPEG: a 1568 px screen is ~1 MB as PNG but ~80 KB
+// as JPEG, which measured ~0.25 s faster to the first token.
+const JPEG_OVER = 300_000;
 
 export class AreaSelector {
     constructor() {
@@ -193,7 +196,7 @@ function encode(pixbuf, pngBytes) {
     let width = pixbuf.get_width();
     let height = pixbuf.get_height();
     const longEdge = Math.max(width, height);
-    if (longEdge <= MAX_EDGE && pngBytes.get_size() <= MAX_BYTES) {
+    if (longEdge <= MAX_EDGE && pngBytes.get_size() <= JPEG_OVER) {
         return {bytes: pngBytes.toArray(), mediaType: 'image/png',
             width, height};
     }
@@ -207,7 +210,7 @@ function encode(pixbuf, pngBytes) {
     }
     let [, bytes] = pixbuf.save_to_bufferv('png', [], []);
     let mediaType = 'image/png';
-    if (bytes.length > MAX_BYTES) {
+    if (bytes.length > JPEG_OVER) {
         // The JPEG encoder (glycin) rejects RGBA: flatten onto white.
         if (pixbuf.get_has_alpha()) {
             const rgb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, false,
@@ -217,7 +220,7 @@ function encode(pixbuf, pngBytes) {
                 GdkPixbuf.InterpType.NEAREST, 255);
             pixbuf = rgb;
         }
-        [, bytes] = pixbuf.save_to_bufferv('jpeg', ['quality'], ['90']);
+        [, bytes] = pixbuf.save_to_bufferv('jpeg', ['quality'], ['85']);
         mediaType = 'image/jpeg';
     }
     return {bytes, mediaType, width, height};

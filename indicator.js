@@ -48,18 +48,37 @@ function wrappedLabel(text, styleClass, markdown = false) {
     label.clutter_text.line_wrap = true;
     label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
     label.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
-    if (markdown) {
-        // set_markup() never throws on bad markup (it just logs), so check
-        // first and fall back to plain text.
-        const markup = mdToPango(text);
-        try {
-            Pango.parse_markup(markup, -1, '');
-            label.clutter_text.set_markup(markup);
-        } catch {
-            label.clutter_text.set_text(text);
-        }
-    }
+    if (markdown)
+        setMarkdown(label, text);
     return label;
+}
+
+function setMarkdown(label, text) {
+    // set_markup() never throws on bad markup (it just logs), so check
+    // first and fall back to plain text. Partial (streaming) Markdown such
+    // as an unclosed ** simply renders literally until it closes.
+    const markup = mdToPango(text);
+    try {
+        Pango.parse_markup(markup, -1, '');
+        label.clutter_text.set_markup(markup);
+    } catch {
+        label.clutter_text.set_text(text);
+    }
+}
+
+/** Streaming answer so far, or the placeholder before the first token. */
+function liveLabel(partial, placeholder = 'Thinking…') {
+    return partial
+        ? wrappedLabel(partial, 'zehntage-answer', true)
+        : wrappedLabel(placeholder, 'zehntage-pending');
+}
+
+/** 'claude-opus-5-5' -> 'Opus 5.5' (falls back to the raw id). */
+export function modelName(id) {
+    const m = /^claude-([a-z]+)-(\d+(?:-\d+)*)$/.exec(id ?? '');
+    if (!m)
+        return id ?? '';
+    return `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2].replaceAll('-', '.')}`;
 }
 
 /**
@@ -89,6 +108,7 @@ export const Indicator = GObject.registerClass(
 class ZehntageIndicator extends PanelMenu.Button {
     /**
      * @param {object} callbacks {onCapture, onFollowUp(entry, q) -> bool,
+     *   onUpgrade(entry), strongModel(),
      *   onRetry(entry), onOpenPrefs, setupHint()}
      */
     _init(callbacks) {
@@ -150,6 +170,27 @@ class ZehntageIndicator extends PanelMenu.Button {
             this._render();
     }
 
+    /**
+     * Streaming update: patch the one live label instead of rebuilding the
+     * menu on every token. Falls back to a full render when the label is
+     * missing or still the "Thinking…" placeholder.
+     */
+    updateLive(entry) {
+        // Collapsed rows just say "Thinking…": nothing to update per token.
+        if (!this.menu.isOpen || entry.id !== this._expandedId)
+            return;
+        const live = this._live;
+        const partial = entry.upgradePending ? entry.partialUpgrade
+            : entry.followUpPending ? entry.partialFollowUp
+                : entry.partial;
+        if (live?.id === entry.id && live.streaming &&
+            live.label.get_stage() && partial) {
+            setMarkdown(live.label, partial);
+            return;
+        }
+        this._render();
+    }
+
     refresh() {
         if (this.menu.isOpen)
             this._render();
@@ -169,6 +210,7 @@ class ZehntageIndicator extends PanelMenu.Button {
                 this._thumbs.delete(path);
         }
         this._historySection.removeAll();
+        this._live = null;
         this._focusTarget = null;
         this._renderItems();
         // Ready for a follow-up right away: just type.
@@ -312,7 +354,9 @@ class ZehntageIndicator extends PanelMenu.Button {
         box.add_child(this._thumbnail(entry, 320, 140));
 
         if (entry.status === 'pending') {
-            box.add_child(wrappedLabel('Thinking…', 'zehntage-pending'));
+            const label = liveLabel(entry.partial);
+            this._live = {id: entry.id, label, streaming: !!entry.partial};
+            box.add_child(label);
         } else if (entry.status === 'error') {
             box.add_child(wrappedLabel(
                 entry.error ?? 'Unknown error', 'zehntage-error'));
@@ -322,24 +366,52 @@ class ZehntageIndicator extends PanelMenu.Button {
                 x_align: Clutter.ActorAlign.START,
             });
             retry.connect('clicked', () => this._cb.onRetry(entry));
-            box.add_child(retry);
+            const row = new St.BoxLayout({style_class: 'zehntage-buttons'});
+            row.add_child(retry);
+            row.add_child(this._upgradeButton(entry));
+            box.add_child(row);
         } else {
-            for (const turn of entry.turns) {
+            entry.turns.forEach((turn, i) => {
                 if (turn.question) {
                     box.add_child(wrappedLabel(
                         `❯ ${turn.question}`, 'zehntage-question'));
+                }
+                const last = i === entry.turns.length - 1;
+                if (last && entry.upgradePending) {
+                    const name = modelName(this._cb.strongModel());
+                    const label = liveLabel(entry.partialUpgrade,
+                        `${name} is thinking…`);
+                    this._live = {id: entry.id, label,
+                        streaming: !!entry.partialUpgrade};
+                    box.add_child(label);
+                    return;
                 }
                 if (turn.answer) {
                     box.add_child(wrappedLabel(
                         turn.answer, 'zehntage-answer', true));
                 }
+                if (turn.model) {
+                    box.add_child(wrappedLabel(`— ${modelName(turn.model)}`,
+                        'zehntage-model-tag'));
+                }
+            });
+            if (entry.upgradeError) {
+                box.add_child(wrappedLabel(
+                    `⚠ ${modelName(this._cb.strongModel())}: ` +
+                    `${entry.upgradeError}`, 'zehntage-error'));
             }
-            if (entry.followUpPending)
-                box.add_child(wrappedLabel('Thinking…', 'zehntage-pending'));
+            if (entry.followUpPending) {
+                const label = liveLabel(entry.partialFollowUp);
+                this._live = {id: entry.id, label,
+                    streaming: !!entry.partialFollowUp};
+                box.add_child(label);
+            }
             if (entry.followUpError) {
                 box.add_child(wrappedLabel(
                     `⚠ ${entry.followUpError}`, 'zehntage-error'));
             }
+            if (!entry.followUpPending && !entry.upgradePending)
+                box.add_child(this._upgradeButton(entry));
             const followUp = this._followUpEntry(entry);
             box.add_child(followUp);
             this._focusTarget = followUp;
@@ -347,6 +419,17 @@ class ZehntageIndicator extends PanelMenu.Button {
 
         item.add_child(box);
         this._historySection.addMenuItem(item);
+    }
+
+    /** [Opus]: re-ask the last question with the strong model. */
+    _upgradeButton(entry) {
+        const button = new St.Button({
+            label: modelName(this._cb.strongModel()),
+            style_class: 'button zehntage-button zehntage-upgrade',
+            x_align: Clutter.ActorAlign.START,
+        });
+        button.connect('clicked', () => this._cb.onUpgrade(entry));
+        return button;
     }
 
     _followUpEntry(entry) {

@@ -20,12 +20,12 @@ export default class ZehntagePreferences extends ExtensionPreferences {
         const apiGroup = new Adw.PreferencesGroup({title: 'Claude'});
         page.add(apiGroup);
 
-        const backends = ['cli', 'api'];
+        const backends = ['api', 'cli'];
         const backendRow = new Adw.ComboRow({
             title: 'Backend',
-            subtitle: 'cli: your Claude Code login (claude -p); api: API key',
+            subtitle: 'api: API key (fastest); cli: your Claude Code login',
             model: Gtk.StringList.new(
-                ['Claude Code CLI', 'Claude API key']),
+                ['Claude API key', 'Claude Code CLI']),
             selected: Math.max(0,
                 backends.indexOf(settings.get_string('backend'))),
         });
@@ -62,6 +62,47 @@ export default class ZehntagePreferences extends ExtensionPreferences {
         effortRow.connect('notify::selected', () =>
             settings.set_string('effort', efforts[effortRow.selected]));
         apiGroup.add(effortRow);
+
+        const streamRow = new Adw.SwitchRow({
+            title: 'Streaming',
+            subtitle: 'API backend only. Show the answer while it is written',
+        });
+        settings.bind('stream', streamRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        apiGroup.add(streamRow);
+
+        const thinkingRow = new Adw.SwitchRow({
+            title: 'Thinking',
+            subtitle: 'API backend only. Off is about 0.4 s faster',
+        });
+        settings.bind('thinking', thinkingRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        apiGroup.add(thinkingRow);
+
+        // --- [Opus] button ---
+        const strongGroup = new Adw.PreferencesGroup({
+            title: 'Opus button',
+            description: 'Re-asks with a stronger model and replaces ' +
+                'the last answer. Thinking is always on.',
+        });
+        page.add(strongGroup);
+
+        const strongModelRow = new Adw.EntryRow({title: 'Model'});
+        strongModelRow.text = settings.get_string('strong-model');
+        strongModelRow.connect('changed', () =>
+            settings.set_string('strong-model', strongModelRow.text.trim()));
+        strongGroup.add(strongModelRow);
+
+        const strongEffortRow = new Adw.ComboRow({
+            title: 'Effort',
+            model: Gtk.StringList.new(efforts),
+            selected: Math.max(0,
+                efforts.indexOf(settings.get_string('strong-effort'))),
+        });
+        strongEffortRow.connect('notify::selected', () =>
+            settings.set_string('strong-effort',
+                efforts[strongEffortRow.selected]));
+        strongGroup.add(strongEffortRow);
 
         // --- Prompt ---
         const promptGroup = new Adw.PreferencesGroup({

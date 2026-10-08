@@ -131,6 +131,7 @@ export default class TestHelper extends Extension {
                 globalThis.zt._fixture = label;
                 return [label.x, label.y, label.width, label.height];
             },
+            getenv: name => GLib.getenv(name),
             /** Solid colored box at a logical stage position. */
             box(x, y, w, h, color = '#ff00ff') {
                 const b = new St.Widget({

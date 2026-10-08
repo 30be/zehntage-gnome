@@ -97,3 +97,21 @@
     spacing: 6px;
     padding: 8px;
 }
+
+.zehntage-buttons {
+    spacing: 8px;
+}
+
+.zehntage-upgrade {
+    background-color: #6b4fbb;
+}
+
+.zehntage-upgrade:hover {
+    background-color: #7d63c9;
+}
+
+.zehntage-model-tag {
+    font-size: 0.85em;
+    font-style: italic;
+    color: #8a8a8a;
+}
