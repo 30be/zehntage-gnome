@@ -2,8 +2,11 @@
 //
 // GJS has no official Anthropic SDK, so this speaks raw HTTP + SSE.
 // Tuned for latency (measured on Haiku 5.5): thinking off by default
-// (~0.4 s faster), streamed so the first words show after ~0.7 s, and a
+// (~0.4 s faster), streamed so the first words show after ~0.8 s, and a
 // pre-warmed keep-alive connection. Both are settings (thinking, stream).
+// No prompt caching on purpose: small crops are below the minimum cacheable
+// size, and for full screens a cache hit measured ~0.3 s *slower* to the
+// first token.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -18,7 +21,8 @@ Gio._promisify(Gio.DataInputStream.prototype, 'read_line_async');
 Gio._promisify(Gio.InputStream.prototype, 'read_bytes_async');
 
 const DEFAULT_BASE = 'https://api.anthropic.com';
-const DEFAULT_MODEL = 'claude-haiku-5-5';
+export const DEFAULT_MODEL = 'claude-haiku-5-5';
+export const DEFAULT_STRONG_MODEL = 'claude-opus-5-5';
 // Thinking tokens count toward max_tokens, so higher effort needs more room.
 const MAX_TOKENS = {low: 8000, medium: 8000, high: 16000, xhigh: 32000,
     max: 32000};
@@ -29,6 +33,10 @@ export class ClaudeClient {
         // Inactivity timeout; streaming sends pings, so this rarely bites.
         this._session = new Soup.Session({timeout: 300});
         this._cancellable = new Gio.Cancellable();
+        // model id -> whether it accepts thinking {type: "disabled"}
+        // (Models API capability; Opus 5.5 does not).
+        this._canDisableThinking = new Map();
+        this._capsPending = new Map();
     }
 
     get hasApiKey() {
@@ -57,27 +65,42 @@ export class ClaudeClient {
 
     /**
      * Opens (DNS + TCP + TLS) the keep-alive connection while the user is
-     * still selecting, with a free metadata request. Errors are ignored.
+     * still selecting, with a free metadata request that also tells whether
+     * the model can run without thinking. Errors are ignored.
      */
     warmUp() {
-        if (!this.hasApiKey)
-            return;
-        const message = this._message('GET',
-            `/v1/models/${encodeURIComponent(this.model)}`);
-        this._session.send_and_read_async(message, GLib.PRIORITY_LOW,
-            this._cancellable).catch(() => {});
+        if (this.hasApiKey)
+            this._fetchCapabilities(this.model).catch(() => {});
     }
 
-    /** User content block for a screenshot. */
-    imageBlock(bytes, mediaType) {
-        return {
-            type: 'image',
-            source: {
-                type: 'base64',
-                media_type: mediaType,
-                data: GLib.base64_encode(bytes),
-            },
-        };
+    /** One shared metadata request per model (warm-up and send). */
+    _fetchCapabilities(model) {
+        let pending = this._capsPending.get(model);
+        if (!pending) {
+            pending = this._doFetchCapabilities(model)
+                .finally(() => this._capsPending.delete(model));
+            this._capsPending.set(model, pending);
+        }
+        return pending;
+    }
+
+    async _doFetchCapabilities(model) {
+        const message = this._message('GET',
+            `/v1/models/${encodeURIComponent(model)}`);
+        const bytes = await this._session.send_and_read_async(message,
+            GLib.PRIORITY_LOW, this._cancellable);
+        if (message.get_status() !== Soup.Status.OK)
+            return;
+        const info = JSON.parse(new TextDecoder().decode(bytes.toArray()));
+        const ok = info.capabilities?.thinking?.types?.disabled?.supported;
+        // No capability info counts as yes (the Haiku default).
+        this._canDisableThinking.set(model, ok ?? true);
+    }
+
+    async _thinkingCanBeOff(model) {
+        if (!this._canDisableThinking.has(model))
+            await this._fetchCapabilities(model).catch(() => {});
+        return this._canDisableThinking.get(model) ?? true;
     }
 
     /**
@@ -91,10 +114,17 @@ export class ClaudeClient {
         if (!this.hasApiKey)
             throw new Error('Claude API key not set');
 
+        const cancellable = this._cancellable;
         const message = this._message('POST', '/v1/messages');
+        // libsoup never reuses an idle connection for a non-idempotent POST
+        // unless told so; without this the warmed-up connection is wasted.
+        message.add_flags(Soup.MessageFlags.IDEMPOTENT);
         // No temperature/top_p/top_k: Haiku 5.5 rejects non-default values.
         effort ??= this._settings.get_string('effort');
         thinking ??= this._settings.get_boolean('thinking');
+        // e.g. Opus 5.5 as the main model rejects "disabled" with a 400.
+        if (!thinking && !await this._thinkingCanBeOff(model))
+            thinking = true;
         const stream = this._settings.get_boolean('stream');
         const body = {
             model,
@@ -113,25 +143,28 @@ export class ClaudeClient {
             new GLib.Bytes(new TextEncoder().encode(JSON.stringify(body))));
 
         const input = await this._session.send_async(message,
-            GLib.PRIORITY_DEFAULT, this._cancellable);
-        const status = message.get_status();
-        if (status !== Soup.Status.OK) {
-            const raw = await readAll(input, this._cancellable);
-            let detail = raw.slice(0, 300);
-            try {
-                detail = JSON.parse(raw).error?.message ?? detail;
-            } catch {}
-            throw new Error(`Claude API ${status}: ${detail}`);
-        }
-
+            GLib.PRIORITY_DEFAULT, cancellable);
         let content, stopReason;
-        if (stream) {
-            ({content, stopReason} = await readEvents(input,
-                this._cancellable, onText));
-        } else {
-            const data = JSON.parse(await readAll(input, this._cancellable));
-            content = data.content ?? [];
-            stopReason = data.stop_reason;
+        try {
+            const status = message.get_status();
+            if (status !== Soup.Status.OK) {
+                const raw = await readAll(input, cancellable);
+                let detail = raw.slice(0, 300);
+                try {
+                    detail = JSON.parse(raw).error?.message ?? detail;
+                } catch {}
+                throw new Error(`Claude API ${status}: ${detail}`);
+            }
+            if (stream) {
+                ({content, stopReason} = await readEvents(input, cancellable,
+                    onText));
+            } else {
+                const data = JSON.parse(await readAll(input, cancellable));
+                content = data.content ?? [];
+                stopReason = data.stop_reason;
+            }
+        } finally {
+            input.close(null);
         }
         if (stopReason === 'refusal')
             throw new Error('Claude declined to answer this one.');
@@ -147,29 +180,49 @@ export class ClaudeClient {
         return {content, text};
     }
 
-    abort() {
-        this._cancellable?.cancel();
-        this._session?.abort();
-        this._cancellable = new Gio.Cancellable();
-    }
-
     destroy() {
-        this.abort();
+        this._cancellable.cancel();
+        this._session.abort();
         this._session = null;
         this._settings = null;
     }
 }
 
-async function readAll(stream, cancellable) {
+/** User content block for a screenshot (both backends). */
+export function imageBlock(bytes, mediaType) {
+    return {
+        type: 'image',
+        source: {
+            type: 'base64',
+            media_type: mediaType,
+            data: GLib.base64_encode(bytes),
+        },
+    };
+}
+
+/**
+ * Whole stream as text. Decoded once at the end: per-chunk decoding would
+ * break UTF-8 sequences split across reads (GJS' TextDecoder has no
+ * {stream: true}).
+ */
+export async function readAll(stream, cancellable = null) {
     const chunks = [];
+    let size = 0;
     for (;;) {
         const bytes = await stream.read_bytes_async(65536,
             GLib.PRIORITY_DEFAULT, cancellable);
         if (bytes.get_size() === 0)
             break;
-        chunks.push(new TextDecoder().decode(bytes.toArray()));
+        chunks.push(bytes.toArray());
+        size += bytes.get_size();
     }
-    return chunks.join('');
+    const all = new Uint8Array(size);
+    let at = 0;
+    for (const chunk of chunks) {
+        all.set(chunk, at);
+        at += chunk.length;
+    }
+    return new TextDecoder().decode(all);
 }
 
 /**
@@ -220,6 +273,5 @@ async function readEvents(stream, cancellable, onText) {
                 'stream error'}`);
         }
     }
-    lines.close(null);
     return {content: content.filter(Boolean), stopReason};
 }

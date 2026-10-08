@@ -9,7 +9,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as BoxPointer from 'resource:///org/gnome/shell/ui/boxpointer.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-import {ClaudeClient} from './claude.js';
+import {ClaudeClient, DEFAULT_STRONG_MODEL, imageBlock} from './claude.js';
 import {CliClient} from './cli.js';
 import {History} from './history.js';
 import {Indicator} from './indicator.js';
@@ -26,20 +26,19 @@ export default class ZehntageExtension extends Extension {
         this._history = new History(this._settings);
         this._selector = new AreaSelector();
         this._timeoutId = 0;
+        // entry id -> in-flight job {kind, partial}; one job per entry.
+        // Kept out of the entries so history.json never stores it.
+        this._jobs = new Map();
 
         this._indicator = new Indicator({
             onCapture: () => this._startCapture(),
-            onFollowUp: (entry, q) => {
-                if (entry.followUpPending || entry.upgradePending)
-                    return false;
-                this._followUp(entry, q).catch(logError);
-                return true;
-            },
-            onRetry: entry => this._retry(entry),
-            onUpgrade: entry => this._upgrade(entry).catch(logError),
+            onFollowUp: (entry, q) => this._followUp(entry, q),
+            onRetry: entry => this._askInitial(entry),
+            onStrong: entry => this._askStrong(entry),
             onOpenPrefs: () => this.openPreferences(),
             setupHint: () => this._setupHint(),
             strongModel: () => this._strong.model,
+            busy: entry => this._jobs?.get(entry.id) ?? null,
         });
         this._indicator.setEntries(this._history.entries);
         Main.panel.addToStatusArea(this.uuid, this._indicator);
@@ -69,11 +68,21 @@ export default class ZehntageExtension extends Extension {
         this._history = null;
         this._indicator?.destroy();
         this._indicator = null;
+        this._jobs = null;
         this._settings = null;
     }
 
     get _backend() {
         return this._settings.get_string('backend');
+    }
+
+    get _strong() {
+        return {
+            model: this._settings.get_string('strong-model').trim() ||
+                DEFAULT_STRONG_MODEL,
+            effort: this._settings.get_string('strong-effort'),
+            thinking: true,
+        };
     }
 
     /** What the user must fix before capturing, or null when ready. */
@@ -92,7 +101,7 @@ export default class ZehntageExtension extends Extension {
         if (this._selector.active || this._timeoutId)
             return;
         if (this._setupHint()) {
-            this._indicator.openWith(this._history.entries);
+            this._indicator.open();
             return;
         }
         // TLS handshake happens while the user is still selecting.
@@ -104,145 +113,175 @@ export default class ZehntageExtension extends Extension {
             this._timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT,
                 MENU_SETTLE_MS, () => {
                     this._timeoutId = 0;
-                    this._selectSafely();
+                    this._select();
                     return GLib.SOURCE_REMOVE;
                 });
             return;
         }
-        this._selectSafely();
+        this._select();
     }
 
     /** Capture failures must be visible, not just logged. */
-    _selectSafely() {
-        this._select().catch(e => {
-            logError(e, 'zehntage-gnome: capture failed');
-            Main.notifyError('Zehntage: capture failed', String(e.message ?? e));
-        });
-    }
-
     async _select() {
-        const shot = await this._selector.select();
-        if (!shot || !this._history)
-            return;
-        const entry = this._history.addEntry(shot, {
-            backend: this._backend,
-            model: this._claude.model,
-            system: this._settings.get_string('system-prompt'),
-        });
-        this._indicator.openWith(this._history.entries);
-        await this._askInitial(entry);
-    }
-
-    async _askInitial(entry, {strong = false} = {}) {
-        entry.status = 'pending';
-        entry.error = null;
-        entry.turns = [];
-        this._indicator.refresh();
         try {
-            const {content, text, model} = await this._ask(entry, null,
-                partial => {
-                    entry.partial = partial;
-                    this._indicator?.updateLive(entry);
-                }, {strong});
-            entry.turns = [{answer: text, content, ...strong ? {model} : {}}];
-            entry.status = 'ok';
+            const shot = await this._selector.select();
+            if (!shot || !this._history)
+                return;
+            const entry = this._history.addEntry(shot, {
+                backend: this._backend,
+                model: this._claude.model,
+                system: this._settings.get_string('system-prompt'),
+            });
+            this._indicator.open();
+            this._askInitial(entry);
         } catch (e) {
-            entry.status = 'error';
-            entry.error = String(e.message ?? e);
+            logError(e, 'zehntage-gnome: capture failed');
+            Main.notifyError('Zehntage: capture failed',
+                String(e.message ?? e));
         }
-        delete entry.partial;
-        this._history?.save();
-        this._indicator?.refresh();
-    }
-
-    _retry(entry) {
-        this._askInitial(entry).catch(logError);
-    }
-
-    /** [Opus]: re-ask the last question with the strong model, replace it. */
-    async _upgrade(entry) {
-        if (entry.status === 'pending' || entry.followUpPending ||
-            entry.upgradePending)
-            return;
-        if (entry.status === 'error' || entry.turns.length === 0) {
-            await this._askInitial(entry, {strong: true});
-            return;
-        }
-        const last = entry.turns.length - 1;
-        const question = entry.turns[last].question ?? null;
-        entry.upgradePending = true;
-        delete entry.upgradeError;
-        this._indicator.refresh();
-        try {
-            const {content, text, model} = await this._ask(entry, question,
-                partial => {
-                    entry.partialUpgrade = partial;
-                    this._indicator?.updateLive(entry);
-                }, {turns: entry.turns.slice(0, last), strong: true});
-            entry.turns[last] = {...question ? {question} : {},
-                answer: text, content, model};
-        } catch (e) {
-            // The previous answer stays; show why the upgrade failed.
-            entry.upgradeError = String(e.message ?? e);
-        }
-        delete entry.upgradePending;
-        delete entry.partialUpgrade;
-        this._history?.save();
-        this._indicator?.refresh();
-    }
-
-    get _strong() {
-        return {
-            model: this._settings.get_string('strong-model').trim() ||
-                'claude-opus-5-5',
-            effort: this._settings.get_string('strong-effort'),
-            thinking: true,
-        };
     }
 
     /**
-     * Sends via the backend the entry was created with. Resolves with
-     * {content, text, model}.
+     * Runs one request for an entry: streams partial text into the popup,
+     * then applies the result or the error, saves and re-renders.
+     *
+     * @returns {boolean} false if the entry already has a request in flight
      */
-    async _ask(entry, question = null, onText = null,
-        {turns = entry.turns, strong = false} = {}) {
-        const {model, effort, thinking} = strong ? this._strong
-            : {model: entry.model ?? this._claude.model};
-        if (entry.backend === 'cli') {
-            const {text} = await this._cli.send({
-                model,
-                effort,
-                system: entry.system,
-                image: {
-                    bytes: this._history.loadImageBytes(entry),
-                    mediaType: entry.mediaType ?? 'image/png',
-                },
-                turns,
-                question,
+    _run(entry, kind, ask, onDone, onError) {
+        if (this._jobs.has(entry.id))
+            return false;
+        const jobs = this._jobs;
+        const job = {kind, partial: ''};
+        jobs.set(entry.id, job);
+        this._indicator.refresh();
+        ask(partial => {
+            job.partial = partial;
+            this._indicator?.updateLive(entry);
+        }).then(onDone, e => onError(String(e.message ?? e)))
+            .catch(logError)
+            .finally(() => {
+                // A re-enable starts a fresh map; never touch its jobs.
+                if (jobs.get(entry.id) === job)
+                    jobs.delete(entry.id);
+                this._history?.save();
+                this._indicator?.refresh();
             });
+        return true;
+    }
+
+    /** First answer (also Retry; strong: the [Opus] button on an error). */
+    _askInitial(entry, strong = false) {
+        if (this._jobs.has(entry.id))
+            return false;
+        entry.status = 'pending';
+        entry.error = null;
+        entry.turns = [];
+        this._clearErrors(entry);
+        return this._run(entry, strong ? 'strong' : 'initial',
+            onText => this._ask(entry, {strong, onText}),
+            ({content, text, model}) => {
+                entry.turns = [{answer: text, content,
+                    ...strong ? {model} : {}}];
+                entry.status = 'ok';
+            },
+            error => {
+                entry.status = 'error';
+                entry.error = error;
+            });
+    }
+
+    _followUp(entry, question) {
+        if (this._jobs.has(entry.id))
+            return false;
+        this._clearErrors(entry);
+        return this._run(entry, 'followUp',
+            onText => this._ask(entry, {question, onText}),
+            ({content, text}) => entry.turns.push({question, answer: text,
+                content}),
+            error => {
+                // Shown in the UI but never sent back to the API; [Opus]
+                // can answer it instead.
+                entry.followUpError = `${question}: ${error}`;
+                entry.failedQuestion = question;
+            });
+    }
+
+    /**
+     * [Opus]: re-ask with the strong model. Answers a just-failed follow-up
+     * if there is one, otherwise replaces the last answer.
+     */
+    _askStrong(entry) {
+        if (entry.status === 'error' || entry.turns.length === 0)
+            return this._askInitial(entry, true);
+        if (this._jobs.has(entry.id))
+            return false;
+        const failed = entry.failedQuestion;
+        const last = entry.turns.length - 1;
+        const question = failed ?? entry.turns[last].question ?? null;
+        const turns = failed ? entry.turns : entry.turns.slice(0, last);
+        this._clearErrors(entry);
+        return this._run(entry, 'strong',
+            onText => this._ask(entry, {question, turns, strong: true,
+                onText}),
+            ({content, text, model}) => {
+                const turn = {...question ? {question} : {}, answer: text,
+                    content, model};
+                if (failed)
+                    entry.turns.push(turn);
+                else
+                    entry.turns[last] = turn;
+            },
+            error => {
+                // The previous answer stays; show why the rewrite failed.
+                entry.strongError = failed ? `${failed}: ${error}` : error;
+                if (failed)
+                    entry.failedQuestion = failed;
+            });
+    }
+
+    _clearErrors(entry) {
+        delete entry.followUpError;
+        delete entry.failedQuestion;
+        delete entry.strongError;
+    }
+
+    /**
+     * Sends via the backend the entry was created with.
+     *
+     * @returns {Promise<{content?, text, model}>}
+     */
+    async _ask(entry, {question = null, turns = entry.turns, strong = false,
+        onText}) {
+        const {model, effort, thinking} = strong ? this._strong
+            : {model: entry.model};
+        const image = {
+            bytes: this._history.loadImageBytes(entry),
+            mediaType: entry.mediaType,
+        };
+        if (entry.backend === 'cli') {
+            const {text} = await this._cli.send({model, effort,
+                system: entry.system, image, turns, question}, onText);
             return {text, model};
         }
         const {content, text} = await this._claude.send({
-            ...this._request(entry, question, turns, model),
+            model,
             effort,
             thinking,
+            system: entry.system,
+            messages: this._messages(entry, image, turns, question, model),
         }, onText);
         return {content, text, model};
     }
 
     /**
-     * API backend, append-only conversation: image, then each answer
-     * verbatim (thinking blocks included — Haiku 5.5 rejects edited
-     * history), then questions. Thinking blocks are bound to the model that
-     * wrote them, so answers from another model (Opus rewrites) are replayed
-     * as plain text.
+     * API conversation, append-only: image, then each answer verbatim
+     * (thinking blocks included — Haiku 5.5 rejects edited history), then
+     * the question. Thinking blocks are bound to the model that wrote them,
+     * so answers from another model (strong rewrites) go back as text.
      */
-    _request(entry, pendingQuestion = null, turns = entry.turns,
-        model = entry.model ?? this._claude.model) {
-        const image = this._claude.imageBlock(
-            this._history.loadImageBytes(entry),
-            entry.mediaType ?? 'image/png');
-        const messages = [{role: 'user', content: [image]}];
+    _messages(entry, image, turns, question, model) {
+        const messages = [{role: 'user',
+            content: [imageBlock(image.bytes, image.mediaType)]}];
         for (const turn of turns) {
             if (turn.question)
                 messages.push({role: 'user', content: turn.question});
@@ -253,35 +292,8 @@ export default class ZehntageExtension extends Extension {
                     : [{type: 'text', text: turn.answer}],
             });
         }
-        if (pendingQuestion)
-            messages.push({role: 'user', content: pendingQuestion});
-        return {
-            model,
-            system: entry.system ?? this._settings.get_string('system-prompt'),
-            messages,
-        };
-    }
-
-    async _followUp(entry, question) {
-        if (entry.followUpPending)
-            return;
-        entry.followUpPending = true;
-        delete entry.followUpError;
-        this._indicator.refresh();
-        try {
-            const {content, text} = await this._ask(entry, question,
-                partial => {
-                    entry.partialFollowUp = partial;
-                    this._indicator?.updateLive(entry);
-                });
-            entry.turns.push({question, answer: text, content});
-        } catch (e) {
-            // Shown in the UI but never sent back to the API.
-            entry.followUpError = `${question}: ${e.message ?? e}`;
-        }
-        delete entry.followUpPending;
-        delete entry.partialFollowUp;
-        this._history?.save();
-        this._indicator?.refresh();
+        if (question)
+            messages.push({role: 'user', content: question});
+        return messages;
     }
 }

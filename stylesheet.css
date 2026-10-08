@@ -1,4 +1,4 @@
-/* zehntage-gnome — catppuccin-mocha-ish accents */
+/* zehntage-gnome — crimson accent, violet for the strong-model button */
 
 /* Area selector overlay */
 .zehntage-shade {
@@ -20,7 +20,6 @@
 .zehntage-prefs-button:hover,
 .zehntage-prefs-button:focus,
 .zehntage-prefs-button:active {
-    border-radius: 6px;
     background-color: rgba(220, 20, 60, 0.25);
 }
 
@@ -48,15 +47,13 @@
 .zehntage-answer,
 .zehntage-question,
 .zehntage-pending,
-.zehntage-error,
-.zehntage-nokey StLabel {
+.zehntage-error {
     /* Text inherits the shell theme's color: works on light and dark. */
     max-width: 34em;
 }
 
 .zehntage-question,
-.zehntage-pending,
-.zehntage-collapsed-label {
+.zehntage-pending {
     font-style: italic;
 }
 
@@ -65,7 +62,6 @@
 }
 
 .zehntage-collapsed-label {
-    font-style: normal;
     max-width: 30em;
 }
 
@@ -93,7 +89,7 @@
     background-color: #e8365a;
 }
 
-.zehntage-nokey {
+.zehntage-setup {
     spacing: 6px;
     padding: 8px;
 }
@@ -102,11 +98,11 @@
     spacing: 8px;
 }
 
-.zehntage-upgrade {
+.zehntage-strong {
     background-color: #6b4fbb;
 }
 
-.zehntage-upgrade:hover {
+.zehntage-strong:hover {
     background-color: #7d63c9;
 }
 

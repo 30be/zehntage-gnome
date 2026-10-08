@@ -2,3 +2,4 @@ schemas/gschemas.compiled
 *.zip
 test/out/
 __pycache__/
+.claude/

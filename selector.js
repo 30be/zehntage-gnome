@@ -17,9 +17,9 @@ Gio._promisify(Shell.Screenshot, 'composite_to_stream');
 const CLICK_SLOP = 4;           // px; smaller drags count as a click
 const MIN_THIN = 24;            // px; a thin drag (underlining) grows to this
 const MAX_EDGE = 1568;          // the API downsizes past this anyway, px
-const MAX_BYTES = 3_700_000;    // 5 MB API limit applies to the base64 text
-// Bigger PNGs go out as JPEG: a 1568 px screen is ~1 MB as PNG but ~80 KB
-// as JPEG, which measured ~0.25 s faster to the first token.
+// Bigger captures go out as JPEG: a 1568 px screen is ~1 MB as PNG but
+// ~80 KB as JPEG (measured ~0.25 s faster to the first token), which also
+// keeps every payload far below the API's 5 MB image limit.
 const JPEG_OVER = 300_000;
 
 export class AreaSelector {
@@ -172,7 +172,7 @@ export class AreaSelector {
  * around their middle; the result is clamped to the texture and never empty
  * (an empty or out-of-bounds sub-texture makes composite_to_stream hang).
  */
-export function toTexture([x, y, w, h], scale, texW, texH) {
+function toTexture([x, y, w, h], scale, texW, texH) {
     if (w < MIN_THIN) {
         x += (w - MIN_THIN) / 2;
         w = MIN_THIN;
@@ -191,7 +191,10 @@ export function toTexture([x, y, w, h], scale, texW, texH) {
     return [x1, y1, x2 - x1, y2 - y1];
 }
 
-/** Downscale huge captures and keep the payload under the API limit. */
+/**
+ * Small crops stay PNG (crisp text); big or huge ones are downscaled to
+ * MAX_EDGE and sent as JPEG.
+ */
 function encode(pixbuf, pngBytes) {
     let width = pixbuf.get_width();
     let height = pixbuf.get_height();
@@ -208,20 +211,15 @@ function encode(pixbuf, pngBytes) {
         pixbuf = pixbuf.scale_simple(width, height,
             GdkPixbuf.InterpType.BILINEAR);
     }
-    let [, bytes] = pixbuf.save_to_bufferv('png', [], []);
-    let mediaType = 'image/png';
-    if (bytes.length > JPEG_OVER) {
-        // The JPEG encoder (glycin) rejects RGBA: flatten onto white.
-        if (pixbuf.get_has_alpha()) {
-            const rgb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, false,
-                8, width, height);
-            rgb.fill(0xffffffff);
-            pixbuf.composite(rgb, 0, 0, width, height, 0, 0, 1, 1,
-                GdkPixbuf.InterpType.NEAREST, 255);
-            pixbuf = rgb;
-        }
-        [, bytes] = pixbuf.save_to_bufferv('jpeg', ['quality'], ['85']);
-        mediaType = 'image/jpeg';
+    // The JPEG encoder (glycin) rejects RGBA: flatten onto white.
+    if (pixbuf.get_has_alpha()) {
+        const rgb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, false,
+            8, width, height);
+        rgb.fill(0xffffffff);
+        pixbuf.composite(rgb, 0, 0, width, height, 0, 0, 1, 1,
+            GdkPixbuf.InterpType.NEAREST, 255);
+        pixbuf = rgb;
     }
-    return {bytes, mediaType, width, height};
+    const [, bytes] = pixbuf.save_to_bufferv('jpeg', ['quality'], ['85']);
+    return {bytes, mediaType: 'image/jpeg', width, height};
 }

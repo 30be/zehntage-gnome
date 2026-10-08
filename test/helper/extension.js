@@ -5,6 +5,7 @@
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import GObject from 'gi://GObject';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 
@@ -132,6 +133,30 @@ export default class TestHelper extends Extension {
                 return [label.x, label.y, label.width, label.height];
             },
             getenv: name => GLib.getenv(name),
+            /** A setting as the shell sees it (GVariant text, typed). */
+            setting(schema, key) {
+                const settings = schema === 'org.gnome.shell.extensions.' +
+                    'zehntage-gnome' ? this.inst()?._settings
+                    : new Gio.Settings({schema_id: schema});
+                return settings?.get_value(key).print(true) ?? null;
+            },
+            settingsBackend() {
+                const s = new Gio.Settings({
+                    schema_id: 'org.gnome.desktop.interface'});
+                return GObject.type_name(s.backend.constructor.$gtype);
+            },
+            /** All actors under root (inclusive) matching pred. */
+            findAll(root, pred) {
+                const out = [];
+                const walk = a => {
+                    if (pred(a))
+                        out.push(a);
+                    for (const c of a.get_children())
+                        walk(c);
+                };
+                walk(root);
+                return out;
+            },
             /** Solid colored box at a logical stage position. */
             box(x, y, w, h, color = '#ff00ff') {
                 const b = new St.Widget({

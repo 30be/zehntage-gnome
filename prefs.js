@@ -6,9 +6,44 @@ import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
 export default class ZehntagePreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
+
+        /** Text row bound to a string key (trimmed). */
+        const entryRow = (title, key, Row = Adw.EntryRow) => {
+            const row = new Row({title, text: settings.get_string(key)});
+            row.connect('changed', () =>
+                settings.set_string(key, row.text.trim()));
+            return row;
+        };
+        /** Drop-down bound to a string key with fixed values. */
+        const comboRow = (title, key, values, {labels = values,
+            subtitle = null} = {}) => {
+            const row = new Adw.ComboRow({
+                title,
+                subtitle,
+                model: Gtk.StringList.new(labels),
+                selected: Math.max(0,
+                    values.indexOf(settings.get_string(key))),
+            });
+            row.connect('notify::selected', () =>
+                settings.set_string(key, values[row.selected]));
+            return row;
+        };
+        /** Switch bound to a boolean key. */
+        const switchRow = (title, key, subtitle) => {
+            const row = new Adw.SwitchRow({title, subtitle});
+            settings.bind(key, row, 'active', Gio.SettingsBindFlags.DEFAULT);
+            return row;
+        };
+        const group = (title, description = null) => {
+            const g = new Adw.PreferencesGroup({title, description});
+            page.add(g);
+            return g;
+        };
 
         const page = new Adw.PreferencesPage({
             title: 'Zehntage',
@@ -16,101 +51,30 @@ export default class ZehntagePreferences extends ExtensionPreferences {
         });
         window.add(page);
 
-        // --- Claude ---
-        const apiGroup = new Adw.PreferencesGroup({title: 'Claude'});
-        page.add(apiGroup);
-
-        const backends = ['api', 'cli'];
-        const backendRow = new Adw.ComboRow({
-            title: 'Backend',
+        const claude = group('Claude');
+        claude.add(comboRow('Backend', 'backend', ['api', 'cli'], {
+            labels: ['Claude API key', 'Claude Code CLI'],
             subtitle: 'api: API key (fastest); cli: your Claude Code login',
-            model: Gtk.StringList.new(
-                ['Claude API key', 'Claude Code CLI']),
-            selected: Math.max(0,
-                backends.indexOf(settings.get_string('backend'))),
-        });
-        backendRow.connect('notify::selected', () =>
-            settings.set_string('backend', backends[backendRow.selected]));
-        apiGroup.add(backendRow);
-
-        const pathRow = new Adw.EntryRow({title: 'claude CLI path'});
-        pathRow.text = settings.get_string('claude-path');
-        pathRow.connect('changed', () =>
-            settings.set_string('claude-path', pathRow.text.trim()));
-        apiGroup.add(pathRow);
-
-        const keyRow = new Adw.PasswordEntryRow({title: 'API key'});
-        keyRow.text = settings.get_string('claude-api-key');
-        keyRow.connect('changed', () =>
-            settings.set_string('claude-api-key', keyRow.text.trim()));
-        apiGroup.add(keyRow);
-
-        const modelRow = new Adw.EntryRow({title: 'Model'});
-        modelRow.text = settings.get_string('model');
-        modelRow.connect('changed', () =>
-            settings.set_string('model', modelRow.text.trim()));
-        apiGroup.add(modelRow);
-
-        const efforts = ['low', 'medium', 'high', 'xhigh', 'max'];
-        const effortRow = new Adw.ComboRow({
-            title: 'Effort',
+        }));
+        claude.add(entryRow('claude CLI path', 'claude-path'));
+        claude.add(entryRow('API key', 'claude-api-key',
+            Adw.PasswordEntryRow));
+        claude.add(entryRow('Model', 'model'));
+        claude.add(comboRow('Effort', 'effort', EFFORTS, {
             subtitle: 'How much the model thinks; low is fastest',
-            model: Gtk.StringList.new(efforts),
-            selected: Math.max(0,
-                efforts.indexOf(settings.get_string('effort'))),
-        });
-        effortRow.connect('notify::selected', () =>
-            settings.set_string('effort', efforts[effortRow.selected]));
-        apiGroup.add(effortRow);
+        }));
+        claude.add(switchRow('Streaming', 'stream',
+            'API backend only. Show the answer while it is written'));
+        claude.add(switchRow('Thinking', 'thinking',
+            'API backend only. Off is about 0.4 s faster'));
 
-        const streamRow = new Adw.SwitchRow({
-            title: 'Streaming',
-            subtitle: 'API backend only. Show the answer while it is written',
-        });
-        settings.bind('stream', streamRow, 'active',
-            Gio.SettingsBindFlags.DEFAULT);
-        apiGroup.add(streamRow);
+        const strong = group('Opus button',
+            'Re-asks with a stronger model and replaces the last answer ' +
+            '(or answers a failed follow-up). Thinking is always on.');
+        strong.add(entryRow('Model', 'strong-model'));
+        strong.add(comboRow('Effort', 'strong-effort', EFFORTS));
 
-        const thinkingRow = new Adw.SwitchRow({
-            title: 'Thinking',
-            subtitle: 'API backend only. Off is about 0.4 s faster',
-        });
-        settings.bind('thinking', thinkingRow, 'active',
-            Gio.SettingsBindFlags.DEFAULT);
-        apiGroup.add(thinkingRow);
-
-        // --- [Opus] button ---
-        const strongGroup = new Adw.PreferencesGroup({
-            title: 'Opus button',
-            description: 'Re-asks with a stronger model and replaces ' +
-                'the last answer. Thinking is always on.',
-        });
-        page.add(strongGroup);
-
-        const strongModelRow = new Adw.EntryRow({title: 'Model'});
-        strongModelRow.text = settings.get_string('strong-model');
-        strongModelRow.connect('changed', () =>
-            settings.set_string('strong-model', strongModelRow.text.trim()));
-        strongGroup.add(strongModelRow);
-
-        const strongEffortRow = new Adw.ComboRow({
-            title: 'Effort',
-            model: Gtk.StringList.new(efforts),
-            selected: Math.max(0,
-                efforts.indexOf(settings.get_string('strong-effort'))),
-        });
-        strongEffortRow.connect('notify::selected', () =>
-            settings.set_string('strong-effort',
-                efforts[strongEffortRow.selected]));
-        strongGroup.add(strongEffortRow);
-
-        // --- Prompt ---
-        const promptGroup = new Adw.PreferencesGroup({
-            title: 'Prompt',
-            description: 'Sent together with every screenshot.',
-        });
-        page.add(promptGroup);
-
+        const prompt = group('Prompt', 'Sent together with every screenshot.');
         const promptView = new Gtk.TextView({
             wrap_mode: Gtk.WrapMode.WORD_CHAR,
             top_margin: 8, bottom_margin: 8,
@@ -119,25 +83,21 @@ export default class ZehntagePreferences extends ExtensionPreferences {
         promptView.buffer.text = settings.get_string('system-prompt');
         promptView.buffer.connect('changed', () =>
             settings.set_string('system-prompt', promptView.buffer.text));
-        const promptScroll = new Gtk.ScrolledWindow({
+        prompt.add(new Gtk.ScrolledWindow({
             min_content_height: 140,
             child: promptView,
             has_frame: true,
-        });
-        promptGroup.add(promptScroll);
+        }));
 
-        // --- Behaviour ---
-        const behaviourGroup = new Adw.PreferencesGroup({title: 'Behaviour'});
-        page.add(behaviourGroup);
-
+        const behaviour = group('Behaviour');
         // Applied on Enter / apply button only: writing on every keystroke
         // would briefly bind partial accelerators (typing <Super>F1 binds
         // <Super>F) system-wide.
         const hotkeyRow = new Adw.EntryRow({
             title: 'Hotkeys, comma-separated (e.g. <Super>z), Enter to apply',
             show_apply_button: true,
+            text: settings.get_strv('capture-hotkey').join(', '),
         });
-        hotkeyRow.text = settings.get_strv('capture-hotkey').join(', ');
         hotkeyRow.connect('apply', () => {
             const accels = hotkeyRow.text.split(',')
                 .map(a => a.trim()).filter(a => a);
@@ -152,7 +112,7 @@ export default class ZehntagePreferences extends ExtensionPreferences {
             hotkeyRow.remove_css_class('error');
             settings.set_strv('capture-hotkey', accels);
         });
-        behaviourGroup.add(hotkeyRow);
+        behaviour.add(hotkeyRow);
 
         const historyRow = new Adw.SpinRow({
             title: 'History size',
@@ -162,6 +122,6 @@ export default class ZehntagePreferences extends ExtensionPreferences {
         });
         settings.bind('history-size', historyRow, 'value',
             Gio.SettingsBindFlags.DEFAULT);
-        behaviourGroup.add(historyRow);
+        behaviour.add(historyRow);
     }
 }

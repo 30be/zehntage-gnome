@@ -4,6 +4,8 @@ import GdkPixbuf from 'gi://GdkPixbuf';
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 
+import {DEFAULT_MODEL} from './claude.js';
+
 Gio._promisify(GdkPixbuf.Pixbuf, 'new_from_stream_at_scale_async',
     'new_from_stream_finish');
 Gio._promisify(Gio.File.prototype, 'read_async');
@@ -20,6 +22,33 @@ export class History {
         GLib.mkdir_with_parents(this._dir, 0o700);
         this.entries = this._load(); // newest first
         this._cancellable = new Gio.Cancellable();
+    }
+
+    /**
+     * The one place for defaults of older entries, so the rest of the code
+     * can rely on backend/model/system/mediaType/turns being set.
+     */
+    _migrate(entry) {
+        // Gemini era (v1): adopt current settings once, and drop errors that
+        // were stored as answers back then.
+        entry.backend ??= this._settings.get_string('backend');
+        entry.model ??= this._settings.get_string('model').trim() ||
+            DEFAULT_MODEL;
+        entry.system ??= this._settings.get_string('system-prompt');
+        entry.mediaType ??= 'image/png';
+        entry.turns = (entry.turns ?? []).filter(t =>
+            !String(t.answer ?? '').startsWith('⚠'));
+        // v2.1 names and in-flight state that used to be saved.
+        if (entry.upgradeError)
+            entry.strongError ??= entry.upgradeError;
+        for (const key of ['upgradeError', 'followUpPending', 'partial',
+            'partialFollowUp', 'upgradePending', 'partialUpgrade'])
+            delete entry[key];
+        // A shell restart mid-request leaves entries stuck pending.
+        if (entry.status === 'pending') {
+            entry.status = 'error';
+            entry.error = 'Interrupted';
+        }
     }
 
     /**
@@ -71,26 +100,8 @@ export class History {
             const list = JSON.parse(new TextDecoder().decode(data));
             if (!Array.isArray(list))
                 return [];
-            for (const entry of list) {
-                // Gemini-era entries: adopt current settings once, and drop
-                // errors that were stored as answers back then.
-                entry.backend ??= this._settings.get_string('backend');
-                entry.model ??= this._settings.get_string('model').trim() ||
-                    'claude-haiku-5-5';
-                entry.system ??= this._settings.get_string('system-prompt');
-                entry.turns = (entry.turns ?? []).filter(t =>
-                    !String(t.answer ?? '').startsWith('⚠'));
-                // A shell restart mid-request leaves entries stuck pending.
-                if (entry.status === 'pending') {
-                    entry.status = 'error';
-                    entry.error = 'Interrupted';
-                }
-                delete entry.followUpPending;
-                delete entry.partial;
-                delete entry.partialFollowUp;
-                delete entry.upgradePending;
-                delete entry.partialUpgrade;
-            }
+            for (const entry of list)
+                this._migrate(entry);
             return list;
         } catch {
             return [];
@@ -127,7 +138,7 @@ export class History {
             backend,
             model,
             system,
-            turns: [],          // [{question?, answer, content}]
+            turns: [],          // [{question?, answer, content?, model?}]
             status: 'pending',  // pending | ok | error
             error: null,
         };

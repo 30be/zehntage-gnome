@@ -1,0 +1,1346 @@
+"""Mock scenarios: every t_* function here runs against the mock API.
+
+The order is the definition order; run.py resets between scenarios.
+"""
+
+import base64
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from harness import *  # noqa: F401,F403  (helpers, Mock, constants)
+from harness import (ANSWER, REAL_HISTORY, ROOT, UUID, GLib, Mock,  # noqa
+                     argval, capture, check, cyan, data_dir, decode_png,
+                     entries, fake_calls, followup, full_px, hotkey,
+                     labels, last_image, magenta, menu_text, noise_background,
+                     png_size, press_strong, px, reload_extension, shot, span,
+                     stage_size, state, use_cli, wait_for, wait_state)
+
+def t_loads(sh):
+    info = sh.js('const e = zt.ext(); '
+                 'return {state: e.state, error: e.error ?? null};')
+    check(info['error'] in (None, ''), f'extension error: {info}')
+    check(info['state'] == 1, f'extension not ACTIVE: {info}')
+
+
+def t_hotkey_opens_selector_and_escape_cancels(sh):
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    shot(sh, 'selector-open.png')
+    sh.js('await zt.chord(zt.Clutter.KEY_Escape);')
+    s = wait_state(sh, lambda s: not s['selector'])
+    check(s['entries'] == 0 and not Mock.requests, 'Escape must not send')
+
+
+def t_right_click_cancels(sh):
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.click(300, 300, zt.Clutter.BUTTON_SECONDARY);')
+    s = wait_state(sh, lambda s: not s['selector'])
+    check(s['entries'] == 0 and not Mock.requests, 'right click must cancel')
+
+
+def t_drag_select_sends_and_shows_answer(sh):
+    fx = sh.js("return zt.fixture('Das Eichhörnchen');")
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    x, y, w, h = fx
+    # Stop mid-drag once to see the selection frame.
+    sh.js(f'await zt.moveTo({x - 10}, {y - 10}); zt.press(); '
+          f'await zt.moveTo({x + w // 2}, {y + h // 2}); '
+          f'await zt.moveTo({x + w + 10}, {y + h + 10}); await zt.sleep(100);')
+    shot(sh, 'selecting.png')
+    sh.js('zt.release();')
+    s = wait_state(sh, lambda s: s['status'] == 'ok')
+    check(s['menuOpen'], 'popup should be open with the answer')
+    check(len(Mock.requests) == 1, f'{len(Mock.requests)} requests')
+    req = Mock.requests[0]
+    check(req['path'] == '/v1/messages', req['path'])
+    check(req['headers'].get('x-api-key') == 'test-key', 'api key header')
+    check(req['headers'].get('anthropic-version') == '2023-06-01', 'version')
+    b = req['body']
+    check(b['model'] == 'claude-haiku-5-5', b['model'])
+    check(b['output_config'] == {'effort': 'low'}, b.get('output_config'))
+    for bad in ('temperature', 'top_p', 'top_k'):
+        check(bad not in b, f'{bad} must not be sent to Haiku 5.5')
+    check('Russian' in b['system'], 'system prompt missing')
+    img = b['messages'][0]['content'][0]
+    check(img['type'] == 'image' and
+          img['source']['media_type'] == 'image/png', img['type'])
+    size = png_size(img['source']['data'])
+    exp = (span(sh, x - 10, x + w + 10), span(sh, y - 10, y + h + 10))
+    check(size == exp, f'crop size {size} != {exp}')
+    text = menu_text(sh)
+    check(not state(sh)['overview'], 'Super+Z must not open the overview')
+    check('Eichhörnchen' in text and 'белка' in text,
+          f'answer not shown: {text!r}')
+    shot(sh, 'answer-popup.png')
+    thumb = sh.js('return zt.inst()._history.entries[0].thumbPath;')
+    check(thumb and Path(thumb).exists(), 'no thumbnail written')
+    tw, th = png_size(base64.b64encode(Path(thumb).read_bytes()))
+    check(tw <= 640 and th <= 280, f'thumbnail {tw}x{th}')
+    check(sh.js('return !!zt.inst()._indicator._thumbs.size;'),
+          'popup does not use the in-memory thumbnail')
+    sh.js('zt._fixture?.destroy(); zt._fixture = null;')
+
+
+def t_click_captures_full_screen(sh):
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sw, shh = stage_size(sh)
+    sh.js(f'await zt.click({sw // 2}, {shh // 2});')
+    wait_state(sh, lambda s: s['status'] == 'ok')
+    img = Mock.requests[0]['body']['messages'][0]['content'][0]
+    check(png_size(img['source']['data']) == full_px(sh),
+          f"{png_size(img['source']['data'])} != full {full_px(sh)}")
+
+
+def t_followup_typed_is_append_only(sh):
+    sh.gset('thinking', 'true')   # so there are thinking blocks to replay
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 400, 300);')
+    wait_state(sh, lambda s: s['status'] == 'ok')
+    first = Mock.requests[0]['body']
+    # Follow-up entry should already have key focus: just type + Enter.
+    sh.js("await zt.type('und Plural?'); "
+          "await zt.chord(zt.Clutter.KEY_Return);")
+    s = wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    check(len(Mock.requests) == 2, 'follow-up not sent')
+    second = Mock.requests[1]['body']
+    msgs = second['messages']
+    check([m['role'] for m in msgs] == ['user', 'assistant', 'user'],
+          [m['role'] for m in msgs])
+    check(msgs[0] == first['messages'][0], 'image turn changed')
+    check(msgs[1]['content'][0] == {'type': 'thinking', 'thinking': '',
+                                    'signature': 'sig1'},
+          'thinking block must be replayed verbatim')
+    check(msgs[2]['content'] == 'und Plural?', msgs[2]['content'])
+    check(second['system'] == first['system'], 'system changed')
+    check('Antwort 2' in menu_text(sh), 'second answer not shown')
+    shot(sh, 'followup.png')
+
+
+def t_api_error_shown_and_retry(sh):
+    Mock.mode = '401'
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    s = wait_state(sh, lambda s: s['status'] == 'error')
+    check('401' in s['error'] and 'invalid x-api-key' in s['error'],
+          s['error'])
+    check('invalid x-api-key' in menu_text(sh), 'error not displayed')
+    shot(sh, 'error.png')
+    Mock.mode = 'ok'
+    sh.js('const i = zt.inst(); i._askInitial(i._history.entries[0]);')
+    wait_state(sh, lambda s: s['status'] == 'ok')
+
+
+def t_refusal_is_error(sh):
+    Mock.mode = 'refusal'
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    s = wait_state(sh, lambda s: s['status'] == 'error')
+    check('declined' in s['error'], s['error'])
+
+
+def t_pending_state_visible(sh):
+    Mock.delay = 1.5
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    wait_state(sh, lambda s: s['status'] == 'pending' and s['menuOpen'])
+    check('Thinking' in menu_text(sh), 'no pending indicator')
+    shot(sh, 'pending.png')
+    wait_state(sh, lambda s: s['status'] == 'ok')
+
+
+def t_hotkey_while_popup_open(sh):
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    wait_state(sh, lambda s: s['status'] == 'ok' and s['menuOpen'])
+    hotkey(sh)
+    s = wait_state(sh, lambda s: s['selector'])
+    check(not s['menuOpen'], 'menu should close before selecting')
+    sh.js('await zt.chord(zt.Clutter.KEY_Escape);')
+    wait_state(sh, lambda s: not s['selector'])
+
+
+def t_menu_item_starts_capture(sh):
+    sh.js('const i = zt.inst(); i._indicator.menu.open(0); '
+          'await zt.sleep(100); '
+          'i._indicator.menu._getMenuItems()[0].activate('
+          'zt.Clutter.get_current_event());')
+    wait_state(sh, lambda s: s['selector'] and not s['menuOpen'])
+    sh.js('await zt.chord(zt.Clutter.KEY_Escape);')
+
+
+def t_history_survives_reload(sh):
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    wait_state(sh, lambda s: s['status'] == 'ok')
+    sh.js(f'''
+        const m = zt.Main.extensionManager;
+        await m.disableExtension('{UUID}');
+        await m.enableExtension('{UUID}');
+        await zt.sleep(200);
+    ''')
+    s = state(sh)
+    check(s['entries'] == 1 and s['status'] == 'ok', f'history lost: {s}')
+    check(s['turns'][0]['answer'] == ANSWER, 'answer lost')
+
+
+def t_no_key_shows_hint(sh):
+    sh.gset('claude-api-key', "''")
+    try:
+        hotkey(sh)
+        s = wait_state(sh, lambda s: s['menuOpen'])
+        check(not s['selector'], 'selector must not open without a key')
+        check('API key is not set' in menu_text(sh), 'no key hint')
+        shot(sh, 'no-key.png')
+    finally:
+        sh.gset('claude-api-key', "'test-key'")
+
+
+def t_prefs_dialog_opens(sh):
+    sh.js('zt.inst().openPreferences();')
+    title = sh.js('''
+        return await zt.waitFor(() => global.display.list_all_windows()
+            .map(w => w.get_title()).find(t => t?.includes('Zehntage')),
+            15000);
+    ''', timeout=20)
+    check(title, 'prefs window did not appear')
+    time.sleep(1)
+    shot(sh, 'prefs.png')
+    sh.js('global.display.list_all_windows().forEach(w => w.delete(0));')
+    time.sleep(0.5)
+    bus = (OUT / 'bus.log').read_text(errors='replace')
+    bad = [line for line in bus.splitlines()
+           if '@lyka/prefs.js' in line or
+           ('zehntage' in line.lower() and 'Error' in line)]
+    check(not bad, f'prefs dialog errors: {bad[:3]}')
+
+
+def t_cli_drag_sends_fast_flags(sh):
+    use_cli(sh)
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 400, 260);')
+    s = wait_state(sh, lambda s: s['status'] in ('ok', 'error'))
+    check(s['status'] == 'ok', s['error'])
+    check(not Mock.requests, 'cli backend must not hit the API')
+    calls = fake_calls()
+    check(len(calls) == 1, f'{len(calls)} cli calls')
+    argv = calls[0]['argv']
+    for flag in ('-p', '--safe-mode', '--strict-mcp-config',
+                 '--no-session-persistence', '--verbose',
+                 '--include-partial-messages'):
+        check(flag in argv, f'missing {flag}')
+    check(argval(argv, '--model') == 'claude-haiku-5-5', argv)
+    check(argval(argv, '--effort') == 'low', argv)
+    check(argval(argv, '--tools') == '', 'tools must be disabled')
+    check(argval(argv, '--input-format') == 'stream-json', argv)
+    check('Russian' in argval(argv, '--system-prompt'), 'system prompt')
+    env = calls[0]['env']
+    check(env.get('DISABLE_AUTOUPDATER') == '1' and
+          env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC') == '1', env)
+    msg = json.loads(calls[0]['stdin'])
+    img = msg['message']['content'][0]
+    check(msg['type'] == 'user' and img['type'] == 'image', msg['type'])
+    check(png_size(img['source']['data']) ==
+          (span(sh, 100, 400), span(sh, 100, 260)), 'crop size')
+    check('белка (cli)' in menu_text(sh), 'cli answer not shown')
+    shot(sh, 'cli-answer.png')
+
+
+def t_cli_followup_carries_transcript(sh):
+    use_cli(sh)
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    wait_state(sh, lambda s: s['status'] == 'ok')
+    sh.js("await zt.type('und Plural?'); "
+          "await zt.chord(zt.Clutter.KEY_Return);")
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    calls = fake_calls()
+    check(len(calls) == 2, f'{len(calls)} cli calls')
+    content = json.loads(calls[1]['stdin'])['message']['content']
+    check(content[0]['type'] == 'image', 'image missing in follow-up')
+    text = content[1]['text']
+    check('белка (cli)' in text and 'New question: und Plural?' in text,
+          text)
+    check('CLI Antwort 2' in menu_text(sh), 'follow-up answer not shown')
+
+
+def t_cli_error_result_shown(sh):
+    use_cli(sh, 'error')
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    s = wait_state(sh, lambda s: s['status'] == 'error')
+    check('Please run /login' in s['error'], s['error'])
+
+
+def t_cli_crash_shows_stderr(sh):
+    use_cli(sh, 'crash')
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    s = wait_state(sh, lambda s: s['status'] == 'error')
+    check('something exploded' in s['error'], s['error'])
+
+
+def t_cli_missing_binary_hint(sh):
+    use_cli(sh)
+    sh.gset('claude-path', "'/nonexistent/claude'")
+    try:
+        hotkey(sh)
+        s = wait_state(sh, lambda s: s['menuOpen'])
+        check(not s['selector'], 'selector must not open')
+        check('claude CLI not found' in menu_text(sh), 'no cli hint')
+    finally:
+        sh.gset('claude-path', f"'{ROOT / 'test' / 'fake-claude.py'}'")
+
+
+# ----- geometry / pixels
+
+def t_crop_alignment_every_monitor(sh):
+    mons = sh.js('return zt.Main.layoutManager.monitors.map('
+                 'm => [m.x, m.y, m.width, m.height]);')
+    boxes = [(mx + 100, my + 120, 200, 90) for mx, my, _, _ in mons]
+    if len(mons) > 1:   # straddling the seam between monitor 1 and 2
+        boxes.append((mons[1][0] - 100, 400, 200, 90))
+    for bx, by, bw, bh in boxes:
+        sh.js(f'zt.box({bx}, {by}, {bw}, {bh});')
+    for bx, by, bw, bh in boxes:
+        # Inset 4px: every edge pixel must be magenta.
+        capture(sh, bx + 4, by + 4, bx + bw - 4, by + bh - 4)
+        w, h, pix = decode_png(last_image()['source']['data'])
+        exp = (span(sh, bx + 4, bx + bw - 4), span(sh, by + 4, by + bh - 4))
+        check((w, h) == exp, f'box {bx},{by}: size {(w, h)} != {exp}')
+        for x, y in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1),
+                     (w // 2, h // 2)):
+            check(magenta(pix(x, y)),
+                  f'box {bx},{by}: pixel {x},{y} = {pix(x, y)}')
+        # Margin 10px: corners outside the box, box edge just inside.
+        capture(sh, bx - 10, by - 10, bx + bw + 10, by + bh + 10)
+        w, h, pix = decode_png(last_image()['source']['data'])
+        m, = px(sh, 10)
+        for x, y in ((1, 1), (w - 2, h - 2)):
+            check(not magenta(pix(x, y)), f'box {bx},{by}: corner {x},{y} '
+                  f'should be outside: {pix(x, y)}')
+        for x, y in ((m + 2, m + 2), (w - m - 3, h - m - 3)):
+            check(magenta(pix(x, y)), f'box {bx},{by}: {x},{y} should be '
+                  f'inside: {pix(x, y)} (off-by-scale?)')
+    shot(sh, 'boxes.png')
+
+
+def t_reverse_drag(sh):
+    sh.js('zt.box(300, 300, 160, 80);')
+    capture(sh, 456, 376, 304, 304)   # bottom-right -> top-left
+    w, h, pix = decode_png(last_image()['source']['data'])
+    exp = (span(sh, 304, 456), span(sh, 304, 376))
+    check((w, h) == exp, f'size {(w, h)} != {exp}')
+    check(magenta(pix(0, 0)) and magenta(pix(w - 1, h - 1)), 'misaligned')
+
+
+def t_drag_to_screen_edges(sh):
+    sw, shh = stage_size(sh)
+    capture(sh, 0, 0, sw - 1, shh - 1)
+    w, h = png_size(last_image()['source']['data'])
+    fw, fh = full_px(sh)
+    check(abs(w - fw) <= 3 and abs(h - fh) <= 3, f'{(w, h)} vs {(fw, fh)}')
+
+
+def t_tiny_drag_is_full_screen(sh):
+    capture(sh, 300, 300, 302, 302)
+    check(png_size(last_image()['source']['data']) == full_px(sh),
+          'tiny drag should capture the whole screen')
+
+
+def t_menu_not_in_capture(sh):
+    sh.js('zt.inst()._indicator.menu.open(0); await zt.sleep(200);')
+    rect = sh.js("""
+        const a = zt.inst()._indicator.menu.actor;
+        const [x, y] = a.get_transformed_position();
+        return [x, y, a.width, a.height].map(Math.round);""")
+    mx, my, mw, mh = rect
+    sh.js(f'zt.box({mx}, {my}, {mw}, {mh});')   # under the menu
+    sh.js('zt.inst()._indicator.menu._getMenuItems()[0].activate('
+          'zt.Clutter.get_current_event());')
+    wait_state(sh, lambda s: s['selector'])
+    sw, shh = stage_size(sh)
+    sh.js(f'await zt.click({sw // 2}, {shh // 2});')
+    wait_state(sh, lambda s: s['status'] == 'ok')
+    w, h, pix = decode_png(last_image()['source']['data'])
+    k = w / px(sh, sw)[0]
+    cx, cy = px(sh, mx + mw // 2, my + mh // 2)
+    check(magenta(pix(int(cx * k), int(cy * k))),
+          'the popup menu leaked into the frozen screenshot')
+
+
+# ----- selector lifecycle / input
+
+def t_escape_mid_drag(sh):
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.moveTo(100, 100); zt.press(); '
+          'await zt.moveTo(300, 300); await zt.chord(zt.Clutter.KEY_Escape); '
+          'zt.release(); await zt.sleep(100);')
+    s = wait_state(sh, lambda s: not s['selector'])
+    check(s['entries'] == 0 and not Mock.requests, 'escape must cancel')
+
+
+def t_double_hotkey_single_overlay(sh):
+    sh.js('const c = zt.Clutter; '
+          'await zt.chord(c.KEY_Super_L, c.KEY_z); '
+          'await zt.chord(c.KEY_Super_L, c.KEY_z);')
+    wait_state(sh, lambda s: s['selector'])
+    time.sleep(0.3)
+    m = sh.js('return zt.modal();')
+    check(m['shades'] == 1 and m['modalCount'] == 1, f'double overlay: {m}')
+    sh.js('await zt.chord(zt.Clutter.KEY_Escape);')
+    wait_state(sh, lambda s: not s['selector'])
+
+
+def t_hotkey_works_in_overview(sh):
+    sh.js('zt.Main.overview.show(); '
+          'await zt.waitFor(() => zt.Main.overview.visible);')
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.chord(zt.Clutter.KEY_Escape);')
+    wait_state(sh, lambda s: not s['selector'])
+
+
+def t_second_accelerator_xf86favorites(sh):
+    sh.gset('capture-hotkey', "['<Super>z', 'XF86Favorites']")
+    sh.js('await zt.chord(zt.Clutter.KEY_Favorites);')
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.chord(zt.Clutter.KEY_Escape);')
+    wait_state(sh, lambda s: not s['selector'])
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.chord(zt.Clutter.KEY_Escape);')
+
+
+def t_hotkey_rebind_at_runtime(sh):
+    sh.gset('capture-hotkey', "['<Super>x']")
+    hotkey(sh)
+    time.sleep(0.6)
+    check(not state(sh)['selector'], 'old hotkey still active')
+    sh.js('await zt.chord(zt.Clutter.KEY_Super_L, zt.Clutter.KEY_x);')
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.chord(zt.Clutter.KEY_Escape);')
+
+
+def t_hotkey_during_pending_two_entries(sh):
+    Mock.delay = 1.5
+    Mock.answer = lambda n, body: f'Antwort {n}'
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    wait_state(sh, lambda s: s['status'] == 'pending')
+    hotkey(sh)    # popup is open and a request is in flight
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(400, 300, 600, 400);')
+    es = wait_for(lambda: (lambda es: es if len(es) == 2 and all(
+        e['status'] == 'ok' for e in es) else None)(entries(sh)), 10,
+        'both entries never finished')
+    check([e['turns'][0]['answer'] for e in es] == ['Antwort 2', 'Antwort 1'],
+          f'answers mixed up: {es}')
+
+
+# ----- disable at awkward moments (a stuck modal would freeze the shell)
+
+
+
+def t_disable_while_selecting(sh):
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    m = reload_extension(sh)
+    check(m['modalCount'] == 0 and m['shades'] == 0, f'stuck modal: {m}')
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.chord(zt.Clutter.KEY_Escape);')
+
+
+def t_disable_during_screen_freeze_race(sh):
+    sh.js(f"""
+        zt.inst()._startCapture();   // now awaiting the stage capture
+        await zt.Main.extensionManager.disableExtension('{UUID}');
+        await zt.sleep(500);
+        globalThis.__modal = zt.modal();
+        await zt.Main.extensionManager.enableExtension('{UUID}');
+        await zt.sleep(200);
+    """)
+    m = sh.js('return globalThis.__modal;')
+    check(m['modalCount'] == 0 and m['shades'] == 0,
+          f'overlay appeared after disable: {m}')
+    time.sleep(1.5)   # a late overlay from the orphaned capture?
+    m = sh.js('return zt.modal();')
+    check(m['modalCount'] == 0 and m['shades'] == 0,
+          f'overlay appeared late after disable: {m}')
+
+
+def t_disable_during_pending_request(sh):
+    Mock.delay = 2.0
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    wait_state(sh, lambda s: s['status'] == 'pending')
+    reload_extension(sh)
+    Mock.wait_idle()   # the aborted request has settled
+    s = state(sh)
+    check(s['entries'] == 1 and s['status'] == 'error' and
+          s['error'] == 'Interrupted', f'after re-enable: {s}')
+    sh.js('const i = zt.inst(); i._askInitial(i._history.entries[0]);')
+    wait_state(sh, lambda s: s['status'] == 'ok', timeout=10)
+
+
+# ----- history persistence
+
+
+
+def t_history_cap_evicts_images(sh):
+    sh.gset('history-size', '2')
+    capture(sh, 100, 100, 200, 200)
+    first = entries(sh)[0]['imagePath']
+    check(Path(first).exists(), 'image not stored')
+    capture(sh, 100, 100, 220, 200)
+    capture(sh, 100, 100, 240, 200)
+    es = entries(sh)
+    check(len(es) == 2, f'{len(es)} entries kept')
+    check(not Path(first).exists(), 'evicted image file not deleted')
+    check(all(Path(e['imagePath']).exists() for e in es), 'kept image gone')
+
+
+def t_corrupt_history_recovers(sh):
+    capture(sh, 100, 100, 200, 200)
+    (data_dir() / 'history.json').write_text('{ this is not json')
+    sh.js(f"""
+        const m = zt.Main.extensionManager;
+        const i = zt.inst();
+        i._history.save = () => {{}};   // keep the garbage on disk
+        await m.disableExtension('{UUID}');
+        await m.enableExtension('{UUID}');
+        await zt.sleep(200);
+    """)
+    check(state(sh)['entries'] == 0, 'garbage history should load empty')
+    capture(sh, 100, 100, 200, 200)
+
+
+def t_legacy_gemini_entry_renders_and_follows_up(sh):
+    capture(sh, 100, 100, 200, 200)
+    sh.js("""
+        const i = zt.inst(), e = i._history.entries[0];
+        for (const k of ['backend', 'model', 'system', 'mediaType'])
+            delete e[k];
+        e.turns = [{answer: 'old **gemini** answer'}];
+        i._history.save();""")
+    reload_extension(sh)
+    sh.js('zt.inst()._indicator.menu.open(0); await zt.sleep(200);')
+    check('old gemini answer' in menu_text(sh), 'legacy answer not rendered')
+    Mock.requests.clear()
+    sh.js("zt.inst()._indicator._focusTarget?.grab_key_focus(); "
+          "await zt.type('noch?'); await zt.chord(zt.Clutter.KEY_Return);")
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    body = Mock.requests[0]['body']
+    check(body['messages'][1] == {'role': 'assistant', 'content': [
+        {'type': 'text', 'text': 'old **gemini** answer'}]}, body['messages'])
+    check(body['model'] == 'claude-haiku-5-5', body['model'])
+
+
+# ----- rendering
+
+def t_markup_special_chars_render_literally(sh):
+    Mock.answer = lambda n, b: ('a < b && c > d <b>raw</b> **fett** '
+                                'unbalanced ** `code <x>` & done')
+    capture(sh, 100, 100, 200, 200)
+    text = menu_text(sh)
+    for frag in ('a < b && c > d', '<b>raw</b>', 'fett', 'code <x>', 'done'):
+        check(frag in text, f'{frag!r} not shown literally: {text!r}')
+
+
+def t_long_answer_stays_on_screen(sh):
+    Mock.answer = lambda n, b: '\n'.join(f'- Zeile {i}' for i in range(150))
+    capture(sh, 100, 100, 200, 200)
+    box = sh.js('''
+        const a = zt.inst()._indicator.menu.actor;
+        const [x, y] = a.get_transformed_position();
+        const m = zt.Main.layoutManager.findMonitorForActor(a);
+        return {y, h: a.height, top: m.y, bottom: m.y + m.height};''')
+    check(box['y'] >= box['top'] and box['y'] + box['h'] <= box['bottom'],
+          f'menu leaves its monitor: {box}')
+    shot(sh, 'long-answer.png')
+
+
+# ----- follow-ups
+
+def t_enter_twice_sends_one_followup(sh):
+    capture(sh, 100, 100, 200, 200)
+    Mock.delay = 1.0
+    sh.js("await zt.type('x'); const c = zt.Clutter; "
+          "await zt.chord(c.KEY_Return); await zt.chord(c.KEY_Return);")
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    Mock.wait_idle()
+    time.sleep(0.3)   # grace: a queued second request would show up now
+    check(len(Mock.requests) == 2, f'{len(Mock.requests)} requests')
+
+
+def t_followup_error_then_recovers(sh):
+    Mock.status = lambda n: 401 if n == 2 else 200
+    capture(sh, 100, 100, 200, 200)
+    sh.js("await zt.type('q1'); await zt.chord(zt.Clutter.KEY_Return);")
+    s = wait_state(sh, lambda s: s['followUpError'])
+    check('401' in s['followUpError'] and len(s['turns']) == 1, s)
+    check('q1' in menu_text(sh), 'follow-up error not displayed')
+    sh.js("zt.inst()._indicator._focusTarget?.grab_key_focus(); "
+          "await zt.type('q2'); await zt.chord(zt.Clutter.KEY_Return);")
+    s = wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    check(not s['followUpError'], 'stale follow-up error')
+    msgs = Mock.requests[2]['body']['messages']
+    check([m['role'] for m in msgs] == ['user', 'assistant', 'user'] and
+          msgs[2]['content'] == 'q2', f'failed q1 leaked into history: {msgs}')
+
+
+# ----- settings / backends
+
+def t_backend_is_pinned_per_entry(sh):
+    capture(sh, 100, 100, 200, 200)            # via API
+    use_cli(sh)
+    sh.js("zt.inst()._indicator._focusTarget?.grab_key_focus(); "
+          "await zt.type('weiter'); await zt.chord(zt.Clutter.KEY_Return);")
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    check(len(Mock.requests) == 2 and not fake_calls(),
+          "follow-up must stay on the entry's backend")
+    capture(sh, 100, 100, 220, 200)            # new entry -> CLI
+    check(len(fake_calls()) == 1 and entries(sh)[0]['backend'] == 'cli',
+          'new capture should use the CLI')
+
+
+def t_effort_and_model_settings(sh):
+    sh.gset('effort', "'medium'")
+    sh.gset('model', "'claude-test-x'")
+    capture(sh, 100, 100, 200, 200)
+    b = Mock.requests[0]['body']
+    check(b['model'] == 'claude-test-x' and
+          b['output_config'] == {'effort': 'medium'}, b)
+    sh.gset('model', "'claude-other'")
+    sh.js("await zt.type('und?'); await zt.chord(zt.Clutter.KEY_Return);")
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    check(Mock.requests[1]['body']['model'] == 'claude-test-x',
+          'model must stay pinned for the conversation')
+
+
+def t_cli_garbage_output(sh):
+    use_cli(sh, 'garbage')
+    s = capture(sh, 100, 100, 200, 200)
+    check(s['status'] == 'error' and 'weird failure' in s['error'], s)
+
+
+def t_cli_hang_is_killed_on_timeout(sh):
+    sh.gset('cli-timeout', '2')
+    use_cli(sh, 'hang')
+    t0 = time.time()
+    s = capture(sh, 100, 100, 200, 200)
+    check(s['status'] == 'error' and 'timed out' in s['error'], s)
+    check(time.time() - t0 < 6, f'took {time.time() - t0:.1f}s')
+    pid = int((Path(os.environ['ZT_FAKE_DIR']) / 'hang.pid').read_text())
+
+    def gone():
+        try:
+            return 'zombie' in Path(f'/proc/{pid}/status').read_text()
+        except FileNotFoundError:
+            return True
+    wait_for(gone, 3, f'hung claude process {pid} left running')
+
+
+def t_thin_horizontal_drag_completes(sh):
+    """Underlining a line of text: 200x0 drag must not hang."""
+    s = capture(sh, 200, 300, 400, 300)
+    check(s['status'] == 'ok', s)
+    w, h = png_size(last_image()['source']['data'])
+    check((w, h) == (span(sh, 200, 400), span(sh, 288, 312)), f'{(w, h)}')
+
+
+def t_thin_drag_at_screen_edge_clamped(sh):
+    shh = sh.js('return zt.Main.layoutManager.monitors[0].height;')
+    s = capture(sh, 100, shh - 1, 300, shh - 1)   # bottom edge, 0 high
+    check(s['status'] == 'ok', s)
+    w, h = png_size(last_image()['source']['data'])
+    check(w == span(sh, 100, 300) and 0 < h <= px(sh, 24)[0] + 1, (w, h))
+
+
+def t_legacy_entry_uses_current_backend(sh):
+    """Gemini-era entries (no backend/model/system) on the default CLI."""
+    use_cli(sh)
+    capture(sh, 100, 100, 200, 200)
+    sh.js("""
+        const i = zt.inst(), e = i._history.entries[0];
+        for (const k of ['backend', 'model', 'system', 'mediaType'])
+            delete e[k];
+        e.turns = [{answer: 'gemini says hi'},
+                   {question: 'q', answer: '⚠ Gemini API error 503: x'}];
+        i._history.save();""")
+    reload_extension(sh)
+    sh.js('zt.inst()._indicator.menu.open(0); await zt.sleep(200);')
+    check('Gemini API error' not in menu_text(sh), 'stored error shown as answer')
+    sh.js("zt.inst()._indicator._focusTarget?.grab_key_focus(); "
+          "await zt.type('noch?'); await zt.chord(zt.Clutter.KEY_Return);")
+    s = wait_state(sh, lambda s: len(s['turns'] or []) == 2 or
+                   s['followUpError'])
+    check(not s['followUpError'], s['followUpError'])
+    calls = fake_calls()
+    check(len(calls) == 2, f'follow-up went elsewhere: {len(calls)} cli calls')
+    text = json.loads(calls[1]['stdin'])['message']['content'][1]['text']
+    check('gemini says hi' in text and '⚠' not in text, text)
+
+
+
+
+def _real_history_fingerprint():
+    return sorted((f.name, f.stat().st_size, f.stat().st_mtime_ns)
+                  for f in REAL_HISTORY.iterdir())
+
+
+def t_real_user_history_copy(sh):
+    """Your actual (Gemini-era) history, copied with rewritten paths."""
+    src = REAL_HISTORY / 'history.json'
+    if not src.exists():
+        print('    (no real history on this machine; skipped)')
+        return
+    before = _real_history_fingerprint()
+    dst = data_dir()
+    data = json.loads(src.read_text())
+    for e in data:
+        name = Path(e['imagePath']).name
+        shutil.copy(REAL_HISTORY / name, dst / name)
+        e['imagePath'] = str(dst / name)   # never point at the real files
+        e.pop('thumbPath', None)           # (v2 adds these; regenerate)
+    leaks = [v for e in data for v in e.values()
+             if isinstance(v, str) and v.startswith(str(REAL_HISTORY))]
+    check(not leaks, f'copy still points at real files: {leaks[:3]}')
+    use_cli(sh)
+    sh.js(f"""
+        const m = zt.Main.extensionManager;
+        const i = zt.inst();
+        i._history.save = () => {{}};
+        await m.disableExtension('{UUID}');
+    """)
+    (dst / 'history.json').write_text(json.dumps(data))
+    sh.js(f"""await zt.Main.extensionManager.enableExtension('{UUID}');
+              await zt.sleep(300);""")
+    es = entries(sh)
+    check(len(es) == len(data), f'{len(es)} of {len(data)} entries loaded')
+    # Legacy entries get thumbnails in the background.
+    wait_for(lambda: all(sh.js('return zt.inst()._history.entries.map('
+                               'e => !!e.thumbPath);')), 15,
+             'legacy thumbnails never created')
+    thumbs = sh.js('return zt.inst()._history.entries.map(e => e.thumbPath);')
+    check(all(thumbs), f'{thumbs.count(None)} thumbnails missing')
+    for t in thumbs:
+        tw, th = png_size(base64.b64encode(Path(t).read_bytes()))
+        check(tw <= 640 and th <= 280, f'thumbnail too big: {tw}x{th}')
+        check(str(t).startswith(str(dst)), f'thumbnail outside test dir: {t}')
+    check(all(e['backend'] == 'cli' and e['model'] for e in es), 'migration')
+    t0 = time.time()
+    sh.js('zt.inst()._indicator.menu.open(0); await zt.sleep(300);')
+    opened = time.time() - t0
+    shot(sh, 'real-history.png')
+    check(opened < 1, f'opening the menu took {opened:.1f}s')
+    sh.js("zt.inst()._indicator._focusTarget?.grab_key_focus(); "
+          "await zt.type('und?'); await zt.chord(zt.Clutter.KEY_Return);")
+    s = wait_state(sh, lambda s: s['followUpError'] or
+                   len(s['turns'] or []) > len(es[0]['turns']))
+    check(not s['followUpError'], s['followUpError'])
+    errs = [n for n, e in enumerate(es) if e['status'] == 'error']
+    if errs:
+        sh.js(f'const i = zt.inst(); i._askInitial(i._history.entries[{errs[0]}]);')
+        wait_for(lambda: entries(sh)[errs[0]]['status'] == 'ok', 8,
+                 'retry of old error')
+    capture(sh, 100, 100, 200, 200)   # evicts the oldest copied entry
+    check(_real_history_fingerprint() == before,
+          'REAL history directory was modified!')
+
+
+def t_collapsed_rows_are_single_line(sh):
+    Mock.status = lambda n: 400 if n == 1 else 200
+    capture(sh, 100, 100, 200, 200)       # error entry
+    sh.js("""const e = zt.inst()._history.entries[0];
+             e.error = 'API error 403: {\\n  "error": {\\n    "code": 403';""")
+    capture(sh, 100, 100, 220, 200)       # newer ok entry -> first collapses
+    labels = sh.js("""
+        const out = [];
+        const walk = a => {
+            if (a.style_class === 'zehntage-collapsed-label')
+                out.push(a.get_text());
+            for (const c of a.get_children()) walk(c);
+        };
+        walk(zt.inst()._indicator.menu.box);
+        return out;""")
+    check(labels, 'no collapsed rows rendered')
+    check(all('\n' not in t for t in labels), f'multi-line row: {labels}')
+
+
+def _followup_text(sh):
+    return sh.js('return zt.inst()._indicator._focusTarget?.get_text() ?? null;')
+
+
+def t_followup_draft_survives_pending_and_rerender(sh):
+    capture(sh, 100, 100, 200, 200)
+    Mock.delay = 1.5
+    sh.js("await zt.type('erste'); await zt.chord(zt.Clutter.KEY_Return);")
+    wait_state(sh, lambda s: s['busy'] == 'followUp')
+    # Type the next question while the first is pending, press Enter too.
+    sh.js("zt.inst()._indicator._focusTarget?.grab_key_focus(); "
+          "await zt.type('zweite'); await zt.chord(zt.Clutter.KEY_Return);")
+    check(_followup_text(sh) == 'zweite',
+          f'text lost while pending: {_followup_text(sh)!r}')
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)  # re-render
+    check(_followup_text(sh) == 'zweite',
+          f'draft lost on re-render: {_followup_text(sh)!r}')
+    check(len(Mock.requests) == 2, 'second question must not be sent yet')
+    Mock.delay = 0
+    sh.js("zt.inst()._indicator._focusTarget?.grab_key_focus(); "
+          "await zt.chord(zt.Clutter.KEY_Return);")
+    wait_state(sh, lambda s: len(s['turns'] or []) == 3)
+    check(Mock.requests[2]['body']['messages'][-1]['content'] == 'zweite',
+          'draft not sent')
+    check(_followup_text(sh) == '', 'field not cleared after sending')
+
+
+def t_noise_image_respects_size_limit(sh):
+    """Incompressible full-screen noise: payload must stay under 5 MB."""
+    noise_background(sh, 'noise.png')
+    sw, shh = stage_size(sh)
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js(f'await zt.click({sw // 2}, {shh // 2});')
+    s = wait_state(sh, lambda s: s['status'] in ('ok', 'error'), timeout=20)
+    check(s['status'] == 'ok', s)
+    src = last_image()['source']
+    check(len(src['data']) < 5_000_000, f'base64 {len(src["data"])} bytes')
+    raw = base64.b64decode(src['data'])
+    magic = {'image/png': b'\x89PNG', 'image/jpeg': b'\xff\xd8'}
+    check(raw.startswith(magic[src['media_type']]), 'type/bytes mismatch')
+    iw, ih, _ = decode_png(src['data'])
+    check(max(iw, ih) <= 1568, f'{iw}x{ih} not downscaled')
+    print(f"    {src['media_type']} {iw}x{ih}, {len(raw) / 1e6:.2f} MB raw")
+
+
+def t_max_tokens_scales_with_effort(sh):
+    for effort, expected in (('low', 8000), ('max', 32000)):
+        sh.gset('effort', f"'{effort}'")
+        capture(sh, 100, 100, 200, 200)
+        b = Mock.requests[-1]['body']
+        check(b['max_tokens'] == expected and
+              b['output_config']['effort'] == effort, b)
+
+
+def t_bad_markup_falls_back_to_plain_text(sh):
+    Mock.answer = lambda n, b: '**a _b** c_ and `x*y` *z*'
+    log = Path(os.environ['ZT_TMP']) / 'shell.log'
+    before = log.read_text(errors='replace').count('Failed to set the markup')
+    capture(sh, 100, 100, 200, 200)
+    answer = labels(sh, 'zehntage-answer')
+    check(answer == ['**a _b** c_ and `x*y` *z*'],
+          f'invalid markup should show as plain text: {answer}')
+    after = log.read_text(errors='replace').count('Failed to set the markup')
+    check(after == before, 'invalid Pango markup reached set_markup()')
+
+
+def t_cli_path_with_tilde(sh):
+    # The shell's $HOME (a throwaway dir in mock runs) gets a link.
+    home = Path(sh.js("return zt.getenv('HOME');"))
+    link = home / 'my-claude'
+    link.unlink(missing_ok=True)
+    link.symlink_to(ROOT / 'test' / 'fake-claude.py')
+    fake = ROOT / 'test' / 'fake-claude.py'
+    use_cli(sh)
+    sh.gset('claude-path', "'~/my-claude'")
+    try:
+        s = capture(sh, 100, 100, 200, 200)
+        check(s['status'] == 'ok', s)
+    finally:
+        sh.gset('claude-path', f"'{fake}'")
+
+
+def t_capture_failure_is_visible(sh):
+    sh.js("""const sel = zt.inst()._selector;
+             globalThis.__origSelect = sel.select;
+             sel.select = async () => { throw new Error('boom in selector'); };""")
+    try:
+        hotkey(sh)
+        found = sh.js("""return await zt.waitFor(() => zt.Main.messageTray
+            .getSources().flatMap(s => s.notifications)
+            .find(n => `${n.title} ${n.body}`.includes('boom in selector')),
+            3000).then(() => true, () => false);""")
+        check(found, 'capture error was swallowed silently')
+    finally:
+        sh.js("""const sel = zt.inst()._selector;
+                 sel.select = globalThis.__origSelect;
+                 zt.Main.messageTray.getSources().forEach(s => s.destroy());""")
+
+
+def t_light_and_dark_theme_screenshots(sh):
+    Mock.answer = lambda n, b: ('**Перевод:** Белка ест орехи.\n\n'
+                                '- *das* Eichhörnchen')
+    Mock.status = lambda n: 401 if n == 1 else 200
+    capture(sh, 100, 100, 200, 200)           # an error entry
+    for scheme in ('prefer-light', 'prefer-dark'):
+        sh.gset('color-scheme', f"'{scheme}'", 'org.gnome.desktop.interface')
+        capture(sh, 100, 100, 260, 200)
+        shot(sh, f'theme-{scheme}.png')
+    dim = sh.js("""
+        const out = [];
+        const walk = a => {
+            if (a.style_class === 'zehntage-answer')
+                out.push(a.get_theme_node().get_foreground_color().alpha);
+            for (const c of a.get_children()) walk(c);
+        };
+        walk(zt.inst()._indicator.menu.box);
+        return out;""")
+    check(dim and all(a == 255 for a in dim), f'answer text dimmed: {dim}')
+    sh.gset('color-scheme', "'default'", 'org.gnome.desktop.interface')
+
+
+# ----- speed: streaming, thinking, warm-up
+
+def t_request_is_tuned_for_speed(sh):
+    capture(sh, 100, 100, 200, 200)
+    b = Mock.requests[0]['body']
+    check(b['stream'] is True, 'request must stream')
+    check(b.get('thinking') == {'type': 'disabled'},
+          f'thinking should be off by default: {b.get("thinking")}')
+    check(b['output_config'] == {'effort': 'low'}, b['output_config'])
+
+
+def t_thinking_switch_on(sh):
+    sh.gset('thinking', 'true')
+    capture(sh, 100, 100, 200, 200)
+    b = Mock.requests[0]['body']
+    check('thinking' not in b, f'thinking on = adaptive default: {b}')
+
+
+def t_warmup_connection_on_hotkey(sh):
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    wait_for(lambda: Mock.gets, 2, 'no warm-up request while selecting')
+    check(Mock.gets == ['/v1/models/claude-haiku-5-5'], Mock.gets)
+    check(not Mock.requests, 'warm-up must not create a message')
+    sh.js('await zt.drag(100, 100, 200, 200);')
+    wait_state(sh, lambda s: s['status'] == 'ok')
+    # The point of warming up: the request reuses that connection.
+    check(Mock.requests[0]['port'] == Mock.get_ports[0],
+          f'request on a new connection: {Mock.requests[0]["port"]} vs '
+          f'warm-up {Mock.get_ports[0]}')
+    check(Mock.gets == ['/v1/models/claude-haiku-5-5'],
+          f'capabilities fetched again: {Mock.gets}')
+
+
+def t_no_warmup_for_cli_backend(sh):
+    use_cli(sh)
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    time.sleep(0.5)
+    check(not Mock.gets, f'cli backend must not touch the API: {Mock.gets}')
+    sh.js('await zt.chord(zt.Clutter.KEY_Escape);')
+
+
+def t_streaming_shows_partial_answer(sh):
+    Mock.answer = lambda n, b: 'ERSTER TEIL zweiter teil DRITTER TEIL'
+    Mock.chunks = 3
+    Mock.chunk_delay = 0.8
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    end = time.time() + 5
+    text = wait_for(lambda: (lambda t: t if 'ERSTER' in t else None)(
+        menu_text(sh)), 5, 'no partial answer')
+    check('ERSTER' in text and 'DRITTER' not in text,
+          f'no partial answer while streaming: {text!r}')
+    check(state(sh)['status'] == 'pending', 'should still be pending')
+    shot(sh, 'streaming.png')
+    s = wait_state(sh, lambda s: s['status'] == 'ok', timeout=8)
+    check(s['turns'][0]['answer'] == 'ERSTER TEIL zweiter teil DRITTER TEIL',
+          s['turns'])
+    check('DRITTER' in menu_text(sh), 'final answer not shown')
+
+
+def t_streaming_followup_partial(sh):
+    capture(sh, 100, 100, 200, 200)
+    Mock.answer = lambda n, b: 'FOLGE eins FOLGE zwei'
+    Mock.chunks = 2
+    Mock.chunk_delay = 0.8
+    sh.js("await zt.type('und?'); await zt.chord(zt.Clutter.KEY_Return);")
+    text = wait_for(lambda: (lambda t: t if 'FOLGE eins' in t else None)(
+        menu_text(sh)), 5, 'no partial follow-up')
+    check('FOLGE eins' in text and 'FOLGE zwei' not in text, text)
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2, timeout=8)
+
+
+def t_stream_error_event_is_shown(sh):
+    Mock.stream_error = True
+    s = capture(sh, 100, 100, 200, 200)
+    check(s['status'] == 'error' and 'Overloaded' in s['error'], s)
+
+
+def t_large_capture_sent_as_jpeg(sh):
+    """A detailed full screen is >300 KB as PNG: must go out as JPEG."""
+    noise_background(sh, 'noise2.png')
+    sw, shh = stage_size(sh)
+    s = capture(sh, 100, 100, 700, 500)
+    check(s['status'] == 'ok', s)
+    src = last_image()['source']
+    check(src['media_type'] == 'image/jpeg', src['media_type'])
+    check(base64.b64decode(src['data'])[:2] == b'\xff\xd8', 'not JPEG bytes')
+
+
+def t_defaults_are_api_stream_no_thinking(sh):
+    for key in ('backend', 'stream', 'thinking', 'effort'):
+        sh.greset(key)
+    s = capture(sh, 100, 100, 200, 200)
+    check(s['status'] == 'ok', s)
+    check(len(Mock.requests) == 1 and not fake_calls(), 'default backend '
+          'must be the API')
+    b = Mock.requests[0]['body']
+    check(b['stream'] is True and b.get('thinking') == {'type': 'disabled'}
+          and b['output_config'] == {'effort': 'low'}, b)
+
+
+def t_stream_setting_off(sh):
+    sh.gset('stream', 'false')
+    s = capture(sh, 100, 100, 200, 200)
+    check(s['status'] == 'ok' and s['turns'][0]['answer'] == ANSWER, s)
+    check(Mock.requests[0]['body']['stream'] is False, 'stream not off')
+    sh.js("await zt.type('und?'); await zt.chord(zt.Clutter.KEY_Return);")
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    check(Mock.requests[1]['body']['stream'] is False, 'follow-up streamed')
+
+
+# ----- real app windows (Wayland and X11 clients)
+
+APP = ROOT / 'test' / 'color-app.py'
+
+
+
+
+class App:
+    """A real GTK client window; closed on exit."""
+
+    def __init__(self, sh, backend, *args):
+        self.sh = sh
+        env = dict(os.environ, GDK_BACKEND=backend, NO_AT_BRIDGE='1')
+        if backend == 'x11':
+            env['DISPLAY'] = sh.js("return zt.getenv('DISPLAY');")
+            # The test shell's Xwayland has its own auth cookie.
+            env['XAUTHORITY'] = sh.js("return zt.getenv('XAUTHORITY');")
+            env.pop('WAYLAND_DISPLAY', None)
+        self.log = Path(os.environ['ZT_TMP']) / 'app.log'
+        self.proc = subprocess.Popen([sys.executable, str(APP), *args],
+                                     env=env, stdout=subprocess.DEVNULL,
+                                     stderr=open(self.log, 'w'))
+        self.display = env.get('DISPLAY')
+
+    def __enter__(self):
+        try:
+            self._wait_window()
+        except RuntimeError as e:
+            tail = self.log.read_text(errors='replace')[-400:]
+            raise RuntimeError(f'app window never appeared (DISPLAY='
+                               f'{self.display}): {tail or e}') from None
+        time.sleep(1.0)   # first frames painted, any fullscreen settled
+        self.rect = self.sh.js("""
+            const w = global.display.list_all_windows()
+                .find(w => w.get_title() === 'zt-color');
+            const r = w.get_frame_rect();
+            return [r.x, r.y, r.width, r.height];""")
+        return self
+
+    def _wait_window(self):
+        self.sh.js("""
+            return await zt.waitFor(() => {
+                const w = global.display.list_all_windows()
+                    .find(w => w.get_title() === 'zt-color');
+                if (!w) return null;
+                const r = w.get_frame_rect();
+                return r.width > 50 ? [r.x, r.y, r.width, r.height] : null;
+            }, 15000);""", timeout=20)
+
+    def __exit__(self, *exc):
+        self.proc.terminate()
+        try:
+            self.proc.wait(5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+        self.sh.js("""await zt.waitFor(() => !global.display.list_all_windows()
+            .some(w => w.get_title() === 'zt-color'), 5000)
+            .catch(() => {});""")
+
+
+def _check_inset(sh, rect, pred, what, inset=20):
+    x, y, w, h = rect
+    capture(sh, x + inset, y + inset, x + w - inset, y + h - inset)
+    iw, ih, pix = decode_png(last_image()['source']['data'])
+    for px_, py_ in ((1, 1), (iw - 2, 1), (1, ih - 2), (iw - 2, ih - 2),
+                     (iw // 2, ih // 2)):
+        check(pred(pix(px_, py_)),
+              f'{what}: pixel {px_},{py_} = {pix(px_, py_)}')
+
+
+def t_capture_wayland_app_window(sh):
+    with App(sh, 'wayland') as app:
+        _check_inset(sh, app.rect, magenta, 'wayland window')
+        shot(sh, 'app-wayland.png')
+
+
+def t_capture_x11_app_window(sh):
+    with App(sh, 'x11') as app:
+        _check_inset(sh, app.rect, magenta, 'X11 (Xwayland) window')
+
+
+def t_capture_fullscreen_app(sh):
+    with App(sh, 'wayland', '--fullscreen') as app:
+        mon = sh.js('return (m => [m.x, m.y, m.width, m.height])'
+                    '(zt.Main.layoutManager.primaryMonitor);')
+        check(app.rect == mon, f'not fullscreen: {app.rect} vs {mon}')
+        _check_inset(sh, app.rect, magenta, 'fullscreen window', inset=60)
+
+
+def t_capture_open_app_menu(sh):
+    """Dropdown open in an app: must be in the frozen frame."""
+    with App(sh, 'wayland', '--menu') as app:
+        x, y, _, _ = app.rect
+        sh.js(f'await zt.click({x + 20}, {y + 15});')
+        menu = sh.js("""
+            return await zt.waitFor(() => {
+                const w = global.display.list_all_windows()
+                    .find(w => w.get_title() !== 'zt-color' &&
+                          w.get_frame_rect().width > 50 &&
+                          w.get_window_type() !== 0);
+                if (!w) return null;
+                const r = w.get_frame_rect();
+                return [r.x, r.y, r.width, r.height];
+            }, 5000);""")
+        time.sleep(0.5)
+        shot(sh, 'app-menu-open.png')
+        _check_inset(sh, menu, cyan, 'open dropdown menu', inset=10)
+        s = state(sh)
+        check(s['status'] == 'ok', s)
+
+
+
+
+def t_opus_button_rewrites_answer(sh):
+    capture(sh, 100, 100, 200, 200)
+    label = sh.js("""return (function find(a) {
+            if (a.style_class?.includes('zehntage-strong')) return a.label;
+            for (const c of a.get_children()) {
+                const r = find(c); if (r) return r;
+            }
+            return null;
+        })(zt.inst()._indicator.menu.box);""")
+    check(label == 'Opus 5.5', f'button label: {label!r}')
+    press_strong(sh)
+    s = wait_state(sh, lambda s: s['turns'] and
+                   s['turns'][0].get('model'), timeout=8)
+    b = Mock.requests[1]['body']
+    check(b['model'] == 'claude-opus-5-5', b['model'])
+    check(b['output_config'] == {'effort': 'high'}, b['output_config'])
+    check('thinking' not in b, 'Opus 5.5: thinking must stay adaptive')
+    check(b['max_tokens'] >= 16000, b['max_tokens'])
+    check(len(b['messages']) == 1 and
+          b['messages'][0]['content'][0]['type'] == 'image', b['messages'])
+    check(len(s['turns']) == 1 and s['turns'][0]['answer'] == '**Opus** 2',
+          s['turns'])
+    text = menu_text(sh)
+    check('Opus 2' in text and 'белка' not in text, 'Haiku answer not replaced')
+    check('— Opus 5.5' in text, 'no model tag')
+    shot(sh, 'opus-rewrite.png')
+    # Follow-up goes back to Haiku; Opus' blocks replayed as text only.
+    sh.js("zt.inst()._indicator._focusTarget?.grab_key_focus(); "
+          "await zt.type('und?'); await zt.chord(zt.Clutter.KEY_Return);")
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    b = Mock.requests[2]['body']
+    check(b['model'] == 'claude-haiku-5-5', b['model'])
+    check(b['messages'][1]['content'] == [{'type': 'text',
+                                           'text': '**Opus** 2'}],
+          b['messages'][1])
+
+
+def t_opus_rewrites_last_followup(sh):
+    capture(sh, 100, 100, 200, 200)
+    sh.js("await zt.type('Plural?'); await zt.chord(zt.Clutter.KEY_Return);")
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    press_strong(sh)
+    s = wait_state(sh, lambda s: s['turns'][-1].get('model'), timeout=8)
+    msgs = Mock.requests[2]['body']['messages']
+    check([m['role'] for m in msgs] == ['user', 'assistant', 'user'] and
+          msgs[2]['content'] == 'Plural?', msgs)
+    check(s['turns'][0]['answer'] == ANSWER and
+          s['turns'][1] == {'question': 'Plural?', 'answer': '**Opus** 3',
+                            'content': s['turns'][1]['content'],
+                            'model': 'claude-opus-5-5'}, s['turns'])
+
+
+def t_opus_after_haiku_error(sh):
+    Mock.status = lambda n: 401 if n == 1 else 200
+    s = capture(sh, 100, 100, 200, 200)
+    check(s['status'] == 'error', s)
+    press_strong(sh)
+    s = wait_state(sh, lambda s: s['status'] == 'ok', timeout=8)
+    check(Mock.requests[1]['body']['model'] == 'claude-opus-5-5', 'model')
+    check(s['turns'][0]['model'] == 'claude-opus-5-5', s['turns'])
+
+
+def t_opus_failure_keeps_haiku_answer(sh):
+    Mock.status = lambda n: 529 if n == 2 else 200
+    capture(sh, 100, 100, 200, 200)
+    press_strong(sh)
+    s = wait_state(sh, lambda s: s['strongError'], timeout=6)
+    err = s['strongError']
+    check('529' in err, f'wrong strong-model error: {err}')
+    s = state(sh)
+    check(s['turns'][0]['answer'] == ANSWER and
+          'model' not in s['turns'][0], 'Haiku answer lost')
+    check('529' in menu_text(sh), 'upgrade error not shown')
+
+
+def t_opus_streams_live(sh):
+    capture(sh, 100, 100, 200, 200)
+    Mock.answer = lambda n, b: 'OPUSTEIL eins OPUSTEIL zwei'
+    Mock.chunks = 2
+    Mock.chunk_delay = 0.8
+    press_strong(sh)
+    text = wait_for(lambda: (lambda t: t if 'OPUSTEIL eins' in t else None)(
+        menu_text(sh)), 5, 'no partial strong answer')
+    check('OPUSTEIL eins' in text and 'OPUSTEIL zwei' not in text and
+          'белка' not in text, text)
+    wait_state(sh, lambda s: s['turns'][0].get('model'), timeout=8)
+
+
+def t_opus_blocks_followup_while_running(sh):
+    capture(sh, 100, 100, 200, 200)
+    Mock.delay = 1.5
+    press_strong(sh)
+    wait_state(sh, lambda s: s['busy'] == 'strong')
+    followup(sh, 'warte')
+    wait_state(sh, lambda s: s['turns'][0].get('model'), timeout=8)
+    Mock.wait_idle()
+    time.sleep(0.3)   # grace: a queued follow-up would show up now
+    check(len(Mock.requests) == 2, 'follow-up sent during the Opus rewrite')
+
+
+def t_opus_with_cli_backend(sh):
+    use_cli(sh)
+    capture(sh, 100, 100, 200, 200)
+    press_strong(sh)
+    s = wait_state(sh, lambda s: s['turns'] and
+                   s['turns'][0].get('model'), timeout=8)
+    argv = fake_calls()[1]['argv']
+    check(argval(argv, '--model') == 'claude-opus-5-5' and
+          argval(argv, '--effort') == 'high', argv)
+    check(not Mock.requests, 'cli entry must not use the API')
+
+
+def t_model_name_labels(sh):
+    names = sh.js("""return import('file://' + zt.ext().path + '/indicator.js')
+        .then(m => ['claude-opus-5-5', 'claude-haiku-5-5', 'claude-fable-5-1',
+                    'claude-sonnet-5', 'weird'].map(m.modelName));""")
+    check(names == ['Opus 5.5', 'Haiku 5.5', 'Fable 5.1', 'Sonnet 5',
+                    'weird'], names)
+
+
+def t_cli_streams_partial_answer(sh):
+    use_cli(sh, 'slowstream')
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    end = time.time() + 6
+    text = wait_for(lambda: (lambda t: t if 'ANFANG' in t else None)(
+        menu_text(sh)), 6, 'no partial CLI answer')
+    check('ANFANG' in text and 'ENDE' not in text,
+          f'no partial CLI answer: {text!r}')
+    s = wait_state(sh, lambda s: s['status'] == 'ok', timeout=10)
+    check(s['turns'][0]['answer'].endswith('ENDE'), s['turns'])
+
+
+
+# ----- correctness fixes from review
+
+def t_opus_answers_failed_followup(sh):
+    Mock.status = lambda n: 529 if n == 2 else 200
+    capture(sh, 100, 100, 200, 200)
+    followup(sh, 'q-failed')
+    wait_state(sh, lambda s: s['followUpError'])
+    press_strong(sh)
+    s = wait_state(sh, lambda s: len(s['turns'] or []) == 2 and
+                   not s['busy'], timeout=8)
+    msgs = Mock.requests[2]['body']['messages']
+    check(Mock.requests[2]['body']['model'] == 'claude-opus-5-5', 'model')
+    check([m['role'] for m in msgs] == ['user', 'assistant', 'user'] and
+          msgs[2]['content'] == 'q-failed', f'wrong question asked: {msgs}')
+    check(s['turns'][0]['answer'] == ANSWER, 'first answer must stay')
+    check(s['turns'][1]['question'] == 'q-failed' and
+          s['turns'][1]['model'] == 'claude-opus-5-5', s['turns'][1])
+    check(not s['followUpError'], 'stale follow-up error')
+
+
+def t_errors_cleared_by_next_success(sh):
+    Mock.status = lambda n: 529 if n == 2 else 200
+    capture(sh, 100, 100, 200, 200)
+    press_strong(sh)
+    wait_state(sh, lambda s: s['strongError'])
+    followup(sh, 'weiter')
+    s = wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    check(not s['strongError'], f'stale strong error: {s["strongError"]}')
+    check('529' not in menu_text(sh), 'old error still on screen')
+
+
+def t_main_model_that_cannot_disable_thinking(sh):
+    sh.gset('model', "'claude-opus-5-5'")
+    s = capture(sh, 100, 100, 200, 200)
+    check(s['status'] == 'ok', s)
+    b = Mock.requests[0]['body']
+    check('thinking' not in b, f'Opus 5.5 rejects thinking disabled: {b}')
+
+
+def t_history_json_has_no_transient_state(sh):
+    Mock.chunks = 3
+    Mock.chunk_delay = 0.5
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 200, 200);')
+    wait_state(sh, lambda s: s['partial'])
+    sh.js('zt.inst()._history.save();')   # a save while streaming
+    path = data_dir() / 'history.json'
+    keys = set().union(*(e.keys() for e in json.loads(path.read_text())))
+    check(not keys & {'partial', 'partialFollowUp', 'followUpPending',
+                      'upgradePending', 'partialUpgrade', 'job'},
+          f'in-flight state saved: {sorted(keys)}')
+    wait_state(sh, lambda s: s['status'] == 'ok', timeout=8)
+
+
+def t_utf8_intact_without_streaming(sh):
+    # Only 3-byte characters, ~180 KB: libsoup hands the body over in
+    # several chunks, and a chunk border inside a character is likely
+    # (a per-chunk decoder slipped through this test with '€uro ' text).
+    sh.gset('stream', 'false')
+    answer = '€' * 60000
+    Mock.answer = lambda n, b: answer
+    for i in range(2):
+        s = capture(sh, 100 + i, 100, 200, 200)
+        check(s['status'] == 'ok', s)
+        got = s['turns'][0]['answer']
+        check(got == answer, f'answer corrupted ({got.count(chr(0xfffd))} '
+              f'replacement chars, {len(got)} vs {len(answer)} chars)')
+
+
+SCENARIOS = [v for k, v in list(globals().items()) if k.startswith('t_')]
