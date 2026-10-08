@@ -1,7 +1,13 @@
 /* zehntage-gnome — catppuccin-mocha-ish accents */
 
-/* Marker border/glow are set inline in capture.js (glow is a gsetting). */
-.zehntage-marker {
+/* Area selector overlay */
+.zehntage-shade {
+    background-color: rgba(0, 0, 0, 0.45);
+}
+
+.zehntage-selection {
+    /* No box-shadow: St paints it filled, tinting the selected area. */
+    border: 2px solid #dc143c;
     background-color: transparent;
 }
 
@@ -30,9 +36,6 @@
 .zehntage-thumb {
     border-radius: 6px;
     border: 1px solid #45475a;
-    background-size: contain;
-    background-position: center;
-    background-repeat: no-repeat;
     background-color: rgba(0, 0, 0, 0.25);
 }
 
@@ -47,37 +50,31 @@
 .zehntage-pending,
 .zehntage-error,
 .zehntage-nokey StLabel {
+    /* Text inherits the shell theme's color: works on light and dark. */
     max-width: 34em;
-    color: #cdd6f4;
+}
+
+.zehntage-question,
+.zehntage-pending,
+.zehntage-collapsed-label {
+    font-style: italic;
 }
 
 .zehntage-question {
-    color: #a6adc8;
-    font-style: italic;
     margin-top: 6px;
 }
 
-.zehntage-pending {
-    color: #a6adc8;
-    font-style: italic;
+.zehntage-collapsed-label {
+    font-style: normal;
+    max-width: 30em;
 }
 
 .zehntage-error {
-    color: #f38ba8;
-}
-
-.zehntage-collapsed-label {
-    color: #a6adc8;
-    max-width: 30em;
+    color: #e01b24;
 }
 
 .zehntage-followup {
     margin-top: 8px;
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    border-radius: 8px;
-    padding: 4px 8px;
 }
 
 .zehntage-followup:focus {

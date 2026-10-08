@@ -1,6 +1,8 @@
 // indicator.js — top-bar button with scrollable history popup.
 
 import Clutter from 'gi://Clutter';
+import Cogl from 'gi://Cogl';
+import GdkPixbuf from 'gi://GdkPixbuf';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
@@ -47,27 +49,55 @@ function wrappedLabel(text, styleClass, markdown = false) {
     label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
     label.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
     if (markdown) {
+        // set_markup() never throws on bad markup (it just logs), so check
+        // first and fall back to plain text.
+        const markup = mdToPango(text);
         try {
-            label.clutter_text.set_markup(mdToPango(text));
-        } catch (e) {
-            console.warn(`zehntage-gnome: markup failed: ${e}`);
+            Pango.parse_markup(markup, -1, '');
+            label.clutter_text.set_markup(markup);
+        } catch {
             label.clutter_text.set_text(text);
         }
     }
     return label;
 }
 
+/**
+ * A menu row that never activates but is not drawn as disabled: inactive
+ * PopupBaseMenuItems become non-reactive, and St dims non-reactive widgets
+ * (:insensitive), which made answers hard to read.
+ */
+const StaticItem = GObject.registerClass(
+class ZehntageStaticItem extends PopupMenu.PopupBaseMenuItem {
+    _init() {
+        super._init({activate: false, hover: false, can_focus: false});
+        this.remove_style_class_name('popup-inactive-menu-item');
+    }
+
+    getSensitive() {
+        return this._parent?.sensitive ?? true;
+    }
+
+    syncSensitive() {
+        const sensitive = super.syncSensitive();
+        this.can_focus = false; // focus belongs to the follow-up entry
+        return sensitive;
+    }
+});
+
 export const Indicator = GObject.registerClass(
 class ZehntageIndicator extends PanelMenu.Button {
     /**
-     * @param {object} callbacks {onCapture, onFollowUp(entry, q),
-     *   onRetry(entry), onOpenPrefs, hasApiKey()}
+     * @param {object} callbacks {onCapture, onFollowUp(entry, q) -> bool,
+     *   onRetry(entry), onOpenPrefs, setupHint()}
      */
     _init(callbacks) {
         super._init(0.5, 'Zehntage');
         this._cb = callbacks;
         this._entries = [];
         this._expandedId = null;
+        this._thumbs = new Map(); // thumbPath -> St.ImageContent | null
+        this._drafts = new Map(); // entry id -> unsent follow-up text
 
         this.add_child(new St.Icon({
             icon_name: 'camera-photo-symbolic',
@@ -132,10 +162,25 @@ class ZehntageIndicator extends PanelMenu.Button {
     }
 
     _render() {
+        // Forget thumbnails of evicted entries.
+        const live = new Set(this._entries.map(e => e.thumbPath));
+        for (const path of this._thumbs.keys()) {
+            if (!live.has(path))
+                this._thumbs.delete(path);
+        }
         this._historySection.removeAll();
+        this._focusTarget = null;
+        this._renderItems();
+        // Ready for a follow-up right away: just type.
+        if (this._focusTarget && this.menu.isOpen)
+            this._focusTarget.grab_key_focus();
+    }
 
-        if (!this._cb.hasApiKey()) {
-            this._renderNoKey();
+    _renderItems() {
+
+        const hint = this._cb.setupHint();
+        if (hint) {
+            this._renderNoKey(hint);
             return;
         }
 
@@ -151,14 +196,13 @@ class ZehntageIndicator extends PanelMenu.Button {
             this._renderEntry(entry);
     }
 
-    _renderNoKey() {
+    _renderNoKey(hint) {
         const item = new PopupMenu.PopupBaseMenuItem({reactive: false});
         const box = new St.BoxLayout({
             orientation: Clutter.Orientation.VERTICAL,
             style_class: 'zehntage-nokey',
         });
-        box.add_child(wrappedLabel(
-            'Gemini API key is not set.', 'zehntage-error'));
+        box.add_child(wrappedLabel(hint, 'zehntage-error'));
         const button = new St.Button({
             label: 'Open settings…',
             style_class: 'button zehntage-button',
@@ -173,14 +217,42 @@ class ZehntageIndicator extends PanelMenu.Button {
         this._historySection.addMenuItem(item);
     }
 
+    /** Cached St.ImageContent of the entry's small thumbnail, or null. */
+    _thumbContent(entry) {
+        if (!entry.thumbPath)
+            return null;
+        let content = this._thumbs.get(entry.thumbPath);
+        if (content !== undefined)
+            return content;
+        content = null;
+        try {
+            const pixbuf = GdkPixbuf.Pixbuf.new_from_file(entry.thumbPath);
+            content = St.ImageContent.new_with_preferred_size(
+                pixbuf.width, pixbuf.height);
+            content.set_bytes(
+                global.stage.context.get_backend().get_cogl_context(),
+                pixbuf.read_pixel_bytes(),
+                pixbuf.has_alpha ? Cogl.PixelFormat.RGBA_8888
+                    : Cogl.PixelFormat.RGB_888,
+                pixbuf.width, pixbuf.height, pixbuf.rowstride);
+        } catch (e) {
+            console.warn(`zehntage-gnome: thumbnail load failed: ${e}`);
+        }
+        this._thumbs.set(entry.thumbPath, content);
+        return content;
+    }
+
     /** Aspect-correct thumbnail; clicking opens the PNG in the viewer. */
     _thumbnail(entry, width, height, clickable = true) {
         const file = Gio.File.new_for_path(entry.imagePath);
+        // Small in-memory content instead of a CSS background-image: St's
+        // texture cache would keep every full-size PNG for the session.
         const image = new St.Widget({
             style_class: 'zehntage-thumb',
             width,
             height,
-            style: `background-image: url("${file.get_uri()}");`,
+            content: this._thumbContent(entry),
+            content_gravity: Clutter.ContentGravity.RESIZE_ASPECT,
         });
         if (!clickable)
             return image;
@@ -210,11 +282,13 @@ class ZehntageIndicator extends PanelMenu.Button {
     _renderCollapsed(entry) {
         const item = new PopupMenu.PopupBaseMenuItem();
         item.add_child(this._thumbnail(entry, 48, 32, false));
+        const firstLine = text => text.trim().split('\n')[0]
+            .replace(/\s+/g, ' ');
         const first = entry.status === 'error'
-            ? `⚠ ${entry.error ?? 'Error'}`
+            ? `⚠ ${firstLine(entry.error ?? 'Error')}`
             : entry.status === 'pending'
                 ? 'Thinking…'
-                : stripMd((entry.turns[0]?.answer ?? '').split('\n')[0]);
+                : stripMd(firstLine(entry.turns[0]?.answer ?? ''));
         const label = new St.Label({
             text: first,
             style_class: 'zehntage-collapsed-label',
@@ -229,10 +303,7 @@ class ZehntageIndicator extends PanelMenu.Button {
     }
 
     _renderExpanded(entry) {
-        const item = new PopupMenu.PopupBaseMenuItem({
-            reactive: false,
-            can_focus: false,
-        });
+        const item = new StaticItem();
         const box = new St.BoxLayout({
             orientation: Clutter.Orientation.VERTICAL,
             style_class: 'zehntage-entry',
@@ -265,7 +336,13 @@ class ZehntageIndicator extends PanelMenu.Button {
             }
             if (entry.followUpPending)
                 box.add_child(wrappedLabel('Thinking…', 'zehntage-pending'));
-            box.add_child(this._followUpEntry(entry));
+            if (entry.followUpError) {
+                box.add_child(wrappedLabel(
+                    `⚠ ${entry.followUpError}`, 'zehntage-error'));
+            }
+            const followUp = this._followUpEntry(entry);
+            box.add_child(followUp);
+            this._focusTarget = followUp;
         }
 
         item.add_child(box);
@@ -274,18 +351,33 @@ class ZehntageIndicator extends PanelMenu.Button {
 
     _followUpEntry(entry) {
         const stEntry = new St.Entry({
-            hint_text: 'follow-up…',
+            hint_text: entry.followUpPending
+                ? 'waiting for the answer…' : 'follow-up…',
             style_class: 'zehntage-followup',
             can_focus: true,
             x_expand: true,
+            text: this._drafts.get(entry.id) ?? '',
         });
+        // Drafts outlive re-renders (every finished answer rebuilds the menu).
+        stEntry.clutter_text.connect('text-changed', () =>
+            this._drafts.set(entry.id, stEntry.get_text()));
         stEntry.clutter_text.connect('activate', () => {
             const text = stEntry.get_text().trim();
-            if (text) {
-                stEntry.set_text('');
-                this._cb.onFollowUp(entry, text);
-            }
+            if (!text)
+                return;
+            // Accepting re-renders synchronously and destroys this entry, so
+            // drop the draft first (the new field starts empty) and do not
+            // touch stEntry afterwards. Rejected (answer pending): keep it.
+            const draft = stEntry.get_text();
+            this._drafts.delete(entry.id);
+            if (!this._cb.onFollowUp(entry, text))
+                this._drafts.set(entry.id, draft);
         });
         return stEntry;
+    }
+
+    destroy() {
+        this._thumbs.clear();
+        super.destroy();
     }
 });

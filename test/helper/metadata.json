@@ -1,0 +1,6 @@
+{
+    "uuid": "zehntage-test-helper@lyka",
+    "name": "Zehntage test helper",
+    "description": "Test-only: enables Eval and exposes input/screenshot helpers as globalThis.zt. Never install in a real session.",
+    "shell-version": ["50"]
+}

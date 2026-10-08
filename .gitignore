@@ -1,2 +1,4 @@
 schemas/gschemas.compiled
 *.zip
+test/out/
+__pycache__/

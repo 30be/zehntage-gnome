@@ -16,21 +16,52 @@ export default class ZehntagePreferences extends ExtensionPreferences {
         });
         window.add(page);
 
-        // --- Gemini ---
-        const apiGroup = new Adw.PreferencesGroup({title: 'Gemini'});
+        // --- Claude ---
+        const apiGroup = new Adw.PreferencesGroup({title: 'Claude'});
         page.add(apiGroup);
 
+        const backends = ['cli', 'api'];
+        const backendRow = new Adw.ComboRow({
+            title: 'Backend',
+            subtitle: 'cli: your Claude Code login (claude -p); api: API key',
+            model: Gtk.StringList.new(
+                ['Claude Code CLI', 'Claude API key']),
+            selected: Math.max(0,
+                backends.indexOf(settings.get_string('backend'))),
+        });
+        backendRow.connect('notify::selected', () =>
+            settings.set_string('backend', backends[backendRow.selected]));
+        apiGroup.add(backendRow);
+
+        const pathRow = new Adw.EntryRow({title: 'claude CLI path'});
+        pathRow.text = settings.get_string('claude-path');
+        pathRow.connect('changed', () =>
+            settings.set_string('claude-path', pathRow.text.trim()));
+        apiGroup.add(pathRow);
+
         const keyRow = new Adw.PasswordEntryRow({title: 'API key'});
-        keyRow.text = settings.get_string('api-key');
+        keyRow.text = settings.get_string('claude-api-key');
         keyRow.connect('changed', () =>
-            settings.set_string('api-key', keyRow.text));
+            settings.set_string('claude-api-key', keyRow.text.trim()));
         apiGroup.add(keyRow);
 
         const modelRow = new Adw.EntryRow({title: 'Model'});
         modelRow.text = settings.get_string('model');
         modelRow.connect('changed', () =>
-            settings.set_string('model', modelRow.text));
+            settings.set_string('model', modelRow.text.trim()));
         apiGroup.add(modelRow);
+
+        const efforts = ['low', 'medium', 'high', 'xhigh', 'max'];
+        const effortRow = new Adw.ComboRow({
+            title: 'Effort',
+            subtitle: 'How much the model thinks; low is fastest',
+            model: Gtk.StringList.new(efforts),
+            selected: Math.max(0,
+                efforts.indexOf(settings.get_string('effort'))),
+        });
+        effortRow.connect('notify::selected', () =>
+            settings.set_string('effort', efforts[effortRow.selected]));
+        apiGroup.add(effortRow);
 
         // --- Prompt ---
         const promptGroup = new Adw.PreferencesGroup({
@@ -44,9 +75,9 @@ export default class ZehntagePreferences extends ExtensionPreferences {
             top_margin: 8, bottom_margin: 8,
             left_margin: 8, right_margin: 8,
         });
-        promptView.buffer.text = settings.get_string('prompt');
+        promptView.buffer.text = settings.get_string('system-prompt');
         promptView.buffer.connect('changed', () =>
-            settings.set_string('prompt', promptView.buffer.text));
+            settings.set_string('system-prompt', promptView.buffer.text));
         const promptScroll = new Gtk.ScrolledWindow({
             min_content_height: 140,
             child: promptView,
@@ -58,13 +89,27 @@ export default class ZehntagePreferences extends ExtensionPreferences {
         const behaviourGroup = new Adw.PreferencesGroup({title: 'Behaviour'});
         page.add(behaviourGroup);
 
+        // Applied on Enter / apply button only: writing on every keystroke
+        // would briefly bind partial accelerators (typing <Super>F1 binds
+        // <Super>F) system-wide.
         const hotkeyRow = new Adw.EntryRow({
-            title: 'Hotkey (e.g. <Super><Shift>g)',
+            title: 'Hotkeys, comma-separated (e.g. <Super>z), Enter to apply',
+            show_apply_button: true,
         });
-        hotkeyRow.text = settings.get_strv('capture-hotkey')[0] ?? '';
-        hotkeyRow.connect('changed', () => {
-            const accel = hotkeyRow.text.trim();
-            settings.set_strv('capture-hotkey', accel ? [accel] : []);
+        hotkeyRow.text = settings.get_strv('capture-hotkey').join(', ');
+        hotkeyRow.connect('apply', () => {
+            const accels = hotkeyRow.text.split(',')
+                .map(a => a.trim()).filter(a => a);
+            const valid = accels.every(a => {
+                const [ok, key, mods] = Gtk.accelerator_parse(a);
+                return ok && (key !== 0 || mods !== 0);
+            });
+            if (!valid) {
+                hotkeyRow.add_css_class('error');
+                return;
+            }
+            hotkeyRow.remove_css_class('error');
+            settings.set_strv('capture-hotkey', accels);
         });
         behaviourGroup.add(hotkeyRow);
 
@@ -77,34 +122,5 @@ export default class ZehntagePreferences extends ExtensionPreferences {
         settings.bind('history-size', historyRow, 'value',
             Gio.SettingsBindFlags.DEFAULT);
         behaviourGroup.add(historyRow);
-
-        const markerRow = new Adw.SpinRow({
-            title: 'Marker size (px)',
-            adjustment: new Gtk.Adjustment({
-                lower: 16, upper: 128, step_increment: 2,
-            }),
-        });
-        settings.bind('marker-size', markerRow, 'value',
-            Gio.SettingsBindFlags.DEFAULT);
-        behaviourGroup.add(markerRow);
-
-        const glowRow = new Adw.SpinRow({
-            title: 'Marker glow (px)',
-            subtitle: 'Blur radius of the red ring’s glow',
-            adjustment: new Gtk.Adjustment({
-                lower: 0, upper: 64, step_increment: 1,
-            }),
-        });
-        settings.bind('marker-glow', glowRow, 'value',
-            Gio.SettingsBindFlags.DEFAULT);
-        behaviourGroup.add(glowRow);
-
-        const interactiveRow = new Adw.SwitchRow({
-            title: 'Interactive capture (area selection)',
-            subtitle: 'Off: capture the whole screen instantly',
-        });
-        settings.bind('interactive-capture', interactiveRow, 'active',
-            Gio.SettingsBindFlags.DEFAULT);
-        behaviourGroup.add(interactiveRow);
     }
 }

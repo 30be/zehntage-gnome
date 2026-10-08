@@ -2,40 +2,58 @@
 <schemalist>
   <schema id="org.gnome.shell.extensions.zehntage-gnome"
           path="/org/gnome/shell/extensions/zehntage-gnome/">
-    <key name="api-key" type="s">
+    <key name="backend" type="s">
+      <choices>
+        <choice value="cli"/>
+        <choice value="api"/>
+      </choices>
+      <default>'cli'</default>
+      <summary>cli: local Claude Code login (claude -p); api: API key</summary>
+    </key>
+    <key name="claude-path" type="s">
+      <default>'claude'</default>
+      <summary>Claude Code CLI binary (name in PATH or absolute path)</summary>
+    </key>
+    <key name="cli-timeout" type="i">
+      <default>60</default>
+      <range min="2" max="600"/>
+      <summary>Kill the claude CLI after this many seconds</summary>
+    </key>
+    <key name="claude-api-key" type="s">
       <default>''</default>
-      <summary>Gemini API key</summary>
+      <summary>Claude API key (platform.claude.com)</summary>
     </key>
     <key name="model" type="s">
-      <default>'gemini-3.1-flash-lite'</default>
-      <summary>Gemini model</summary>
+      <default>'claude-haiku-5-5'</default>
+      <summary>Claude model ID</summary>
+    </key>
+    <key name="effort" type="s">
+      <choices>
+        <choice value="low"/>
+        <choice value="medium"/>
+        <choice value="high"/>
+        <choice value="xhigh"/>
+        <choice value="max"/>
+      </choices>
+      <default>'low'</default>
+      <summary>Thinking effort (output_config.effort)</summary>
+    </key>
+    <key name="api-base-url" type="s">
+      <default>'https://api.anthropic.com'</default>
+      <summary>API base URL (override for tests)</summary>
     </key>
     <key name="capture-hotkey" type="as">
-      <default><![CDATA[['<Super><Shift>g']]]></default>
-      <summary>Hotkey that starts a capture</summary>
+      <default><![CDATA[['<Super>z']]]></default>
+      <summary>Hotkeys that start a capture</summary>
     </key>
-    <key name="prompt" type="s">
-      <default>'The attached image is a fragment of the user\'s screen. The red ring marks the point the user is interested in. Concisely explain what is shown there and what it means; focus on the marked point but use the rest of the image as context. The user is a native Russian speaker, fluent in English, learning German. Answer in Russian. If the marked content is a German word or phrase, translate and briefly explain it.'</default>
-      <summary>Prompt sent with every screenshot</summary>
+    <key name="system-prompt" type="s">
+      <default>'The image is a region of the user\'s screen they want explained. The user is a native Russian speaker, fluent in English, learning German. Answer in Russian, at most 3 short lines, no preamble. German text: give the translation, plus one note on a notable word or grammar point only if useful. Light Markdown (bold), no tables, no headings.'</default>
+      <summary>System prompt sent with every screenshot</summary>
     </key>
     <key name="history-size" type="i">
       <default>20</default>
       <range min="1" max="200"/>
       <summary>Maximum number of history entries</summary>
-    </key>
-    <key name="marker-size" type="i">
-      <default>40</default>
-      <range min="16" max="128"/>
-      <summary>Diameter of the red marker ring, px</summary>
-    </key>
-    <key name="marker-glow" type="i">
-      <default>10</default>
-      <range min="0" max="64"/>
-      <summary>Glow (box-shadow blur) of the red marker ring, px</summary>
-    </key>
-    <key name="interactive-capture" type="b">
-      <default>false</default>
-      <summary>Open the interactive area-selection UI instead of capturing the full screen</summary>
     </key>
   </schema>
 </schemalist>

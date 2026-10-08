@@ -4,8 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 gnome-extensions pack --force \
-    --extra-source=capture.js \
-    --extra-source=gemini.js \
+    --extra-source=selector.js \
+    --extra-source=claude.js \
+    --extra-source=cli.js \
     --extra-source=history.js \
     --extra-source=indicator.js \
     .
