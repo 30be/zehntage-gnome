@@ -68,9 +68,15 @@ export class AreaSelector {
         const area = rect => toTexture(rect, scale, texW, texH);
         let early = null, earlyShot = null;
         const start = (x, y) => {
-            if (earlyShot)
+            const want = contextArea([x, y, 0, 0]);
+            if (early?.join() === want.join())
                 return;
-            early = contextArea([x, y, 0, 0]);
+            // The drag starts on another monitor than the pointer was on at
+            // the hotkey: capture that one instead, unless other captures
+            // are still encoding besides ours.
+            if (earlyShot && running > 1)
+                return;
+            early = want;
             earlyShot = captureArea(texture, area(early), scale);
             earlyShot.catch(() => {}); // unused if the drag ends elsewhere
         };
@@ -89,15 +95,16 @@ export class AreaSelector {
         if (pick.click)
             return {focus: shotImage(shot), context: null};
 
-        // Selection relative to the capture, clamped to it (a thin drag
-        // padded at a monitor edge may poke out).
+        // Selection relative to the capture, cut to it on both edges (a
+        // thin drag padded at a monitor edge may poke out).
         const [x, y, w, h] = area(pick.rect);
         const {pixbuf} = shot;
         const W = pixbuf.get_width(), H = pixbuf.get_height();
-        const sx = Math.min(Math.max(x - shot.area[0], 0), W - 1);
-        const sy = Math.min(Math.max(y - shot.area[1], 0), H - 1);
-        const sel = [sx, sy, Math.max(1, Math.min(w, W - sx)),
-            Math.max(1, Math.min(h, H - sy))];
+        const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+        const ax = x - shot.area[0], ay = y - shot.area[1];
+        const x1 = clamp(ax, 0, W - 1), y1 = clamp(ay, 0, H - 1);
+        const x2 = clamp(ax + w, x1 + 1, W), y2 = clamp(ay + h, y1 + 1, H);
+        const sel = [x1, y1, x2 - x1, y2 - y1];
         const focus = encode(pixbuf.new_subpixbuf(...sel).copy());
         return {focus, context: context ? outlined(shot, sel) : null};
     }
@@ -285,17 +292,22 @@ function outlined({pixbuf, small}, sel) {
     const W = image.get_width(), H = image.get_height();
     const k = W / pixbuf.get_width();
     const [x, y, w, h] = sel.map(v => Math.round(v * k));
+    // The frame's strips lie outside the selection (1 px gap) by
+    // construction; at the image border they are cut, never moved inward.
     const t = FRAME_PX;
-    const x1 = Math.max(0, x - t - 1), y1 = Math.max(0, y - t - 1);
-    const x2 = Math.min(W, x + w + t + 1), y2 = Math.min(H, y + h + t + 1);
+    const ox1 = x - t - 1, oy1 = y - t - 1;
+    const ox2 = x + w + 1 + t, oy2 = y + h + 1 + t;
     const strip = (sx, sy, sw, sh) => {
-        if (sw > 0 && sh > 0)  // sub-pixbufs share the parent's pixels
-            image.new_subpixbuf(sx, sy, sw, sh).fill(FRAME_RGBA);
+        const cx1 = Math.max(sx, 0), cy1 = Math.max(sy, 0);
+        const cx2 = Math.min(sx + sw, W), cy2 = Math.min(sy + sh, H);
+        if (cx2 > cx1 && cy2 > cy1)  // sub-pixbufs share the parent's pixels
+            image.new_subpixbuf(cx1, cy1, cx2 - cx1, cy2 - cy1)
+                .fill(FRAME_RGBA);
     };
-    strip(x1, y1, x2 - x1, Math.min(t, y2 - y1));                   // top
-    strip(x1, Math.max(y1, y2 - t), x2 - x1, Math.min(t, y2 - y1)); // bottom
-    strip(x1, y1, Math.min(t, x2 - x1), y2 - y1);                   // left
-    strip(Math.max(x1, x2 - t), y1, Math.min(t, x2 - x1), y2 - y1); // right
+    strip(ox1, oy1, ox2 - ox1, t);          // top
+    strip(ox1, oy2 - t, ox2 - ox1, t);      // bottom
+    strip(ox1, oy1, t, oy2 - oy1);          // left
+    strip(ox2 - t, oy1, t, oy2 - oy1);      // right
     return {...jpeg(image), rect: [x, y, w, h]};
 }
 

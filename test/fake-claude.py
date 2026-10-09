@@ -3,13 +3,14 @@
 
 ZT_FAKE_DIR (from the test shell's environment) holds `mode`
 (ok | error | crash | garbage | hang | slowstream) and `factcheck` (ok | error |
-crash | slow, for --json-schema runs), and receives one calls.jsonl line per
-invocation.
+crash | slow [seconds] | limit, for --json-schema runs), and receives one calls.jsonl
+line per invocation.
 """
 
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 d = Path(os.environ['ZT_FAKE_DIR'])
@@ -30,9 +31,13 @@ if '--json-schema' in sys.argv:   # the fact-check
     if fmode == 'crash':
         print('Error: fact-check exploded', file=sys.stderr)
         sys.exit(1)
-    if fmode == 'slow':
-        import time
-        time.sleep(3)
+    if fmode == 'limit':
+        print(json.dumps({'type': 'result', 'subtype': 'success',
+                          'is_error': True,
+                          'result': 'Claude AI usage limit reached'}))
+        sys.exit(0)
+    if fmode.startswith('slow'):
+        time.sleep(float(fmode.split()[1]) if ' ' in fmode else 3)
     out = {'significant_error': fmode == 'error',
            'correction': '**frisst** значит «ест», а не «пьёт».'
            if fmode == 'error' else ''}
@@ -42,7 +47,6 @@ if '--json-schema' in sys.argv:   # the fact-check
                       'structured_output': out}), flush=True)
     sys.exit(0)
 if mode == 'hang':
-    import time
     (d / 'hang.pid').write_text(str(os.getpid()))
     time.sleep(120)
 if mode == 'garbage':
@@ -74,5 +78,4 @@ else:
 for msg in out:
     print(json.dumps(msg), flush=True)
     if mode == 'slowstream' and msg['type'] == 'stream_event':
-        import time
         time.sleep(0.4)

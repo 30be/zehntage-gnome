@@ -50,6 +50,9 @@ BASE_SETTINGS = {
     # The virtual pointer starts at (0,0): the hot corner would open the
     # overview on the first pointer event.
     ('org.gnome.desktop.interface', 'enable-hot-corners'): 'false',
+    # A long run (4K memory test) once hit the idle lock screen.
+    ('org.gnome.desktop.session', 'idle-delay'): '0',
+    ('org.gnome.desktop.screensaver', 'lock-enabled'): 'false',
 }
 
 
@@ -99,6 +102,7 @@ class Mock:
     answer: Callable | None = None   # callable(n, body) -> text
     status: Callable | None = None   # callable(n) -> http status
     delay = 0.0          # seconds before answering
+    get_status = 200     # of the model metadata (warm-up) requests
     chunks = 3           # text deltas per answer when streaming
     chunk_delay = 0.0    # seconds between deltas
     stream_error = False  # send an SSE error event mid-answer
@@ -110,6 +114,7 @@ class Mock:
         cls.mode = 'ok'
         cls.answer = cls.status = None
         cls.delay = cls.chunk_delay = 0.0
+        cls.get_status = 200
         cls.chunks = 3
         cls.stream_error = False
         cls.requests.clear()
@@ -147,6 +152,10 @@ class Handler(BaseHTTPRequestHandler):
     def _get(self):
         Mock.gets.append(self.path)
         Mock.get_ports.append(self.client_address[1])
+        if Mock.get_status != 200:
+            self._send(Mock.get_status, {'type': 'error', 'error': {
+                'type': 'not_found_error', 'message': 'no metadata'}})
+            return
         model = self.path.rsplit('/', 1)[-1]
         info = {'id': model, 'type': 'model'}
         if 'opus' in model:   # like the real Models API for Opus 5.5
@@ -458,7 +467,8 @@ class Shell:
                         break
                     block.append(nxt)
                 text = '\n'.join(block)
-                if 'boom in selector' in text:   # deliberately injected
+                if any(w in text for w in (     # deliberately injected
+                        'boom in selector', 'unreadable history')):
                     continue
                 if '@lyka/' in text or 'zehntage-gnome:' in text:
                     out.append(line.strip())
@@ -675,6 +685,15 @@ def press_strong(sh):
         b.emit('clicked', 1);''')
 
 
+def press_cancel(sh):
+    """Click the Cancel button of the expanded entry."""
+    sh.js('''
+        const [b] = zt.findAll(zt.inst()._indicator.menu.box,
+            a => a.style_class?.includes('zehntage-cancel'));
+        if (!b) throw new Error('no cancel button');
+        b.emit('clicked', 1);''')
+
+
 def reload_extension(sh, before_disable=''):
     """Disable + enable the extension; returns the modal state while off."""
     sh.js(f'''
@@ -739,6 +758,8 @@ def reset(sh):
     sh.js('''
         const i = zt.inst();
         i._selector.cancel();
+        i._check?.cancellable.cancel();
+        i._checkPausedUntil = 0;
         i._indicator.menu.close(0);
         i._history.entries.length = 0;
         i._history.save();
@@ -754,5 +775,6 @@ def reset(sh):
     Mock.reset()
     sh.reset_settings()
     fake = Path(os.environ['ZT_FAKE_DIR'])
-    for f in ('mode', 'factcheck', 'calls.jsonl'):
+    for f in ('mode', 'factcheck', 'calls.jsonl', 'hang.pid'):
         (fake / f).unlink(missing_ok=True)
+    (data_dir() / 'history.json.bak').unlink(missing_ok=True)

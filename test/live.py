@@ -80,8 +80,7 @@ def live_api(sh):
               f'after release, significant={fc["significant"]} '
               f'{fc["correction"][:100]!r}')
     t0 = time.time()
-    sh.js("await zt.type('Wie ist der Plural?'); "
-          "await zt.chord(zt.Clutter.KEY_Return);")
+    followup(sh, 'Wie ist der Plural?')
     s = wait_state(sh, lambda s: len(s['turns'] or []) == 2 or
                    s['followUpError'], timeout=60)
     check(not s['followUpError'], s['followUpError'])
@@ -145,8 +144,7 @@ def live_cli(sh):
               f'{s["turns"][0]["answer"][:70]!r}')
     shot(sh, 'live-cli.png')
     t0 = time.time()
-    sh.js("await zt.type('Wie ist der Plural?'); "
-          "await zt.chord(zt.Clutter.KEY_Return);")
+    followup(sh, 'Wie ist der Plural?')
     s = wait_state(sh, lambda s: len(s['turns'] or []) == 2 or
                    s['followUpError'], timeout=60)
     check(not s['followUpError'], s['followUpError'])

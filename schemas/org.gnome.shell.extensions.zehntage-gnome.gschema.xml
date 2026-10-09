@@ -86,7 +86,7 @@
     </key>
     <key name="factcheck-web" type="b">
       <default>true</default>
-      <summary>Let the fact-check search and fetch from the web</summary>
+      <summary>Let the fact-check search the web (WebSearch only)</summary>
     </key>
     <key name="factcheck-timeout" type="i">
       <default>180</default>

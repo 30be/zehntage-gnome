@@ -3,8 +3,9 @@
 // Uses the user's existing Claude login, no API key. Tuned for latency:
 // safe mode (no plugins/hooks/MCP/CLAUDE.md), no tools, a short custom system
 // prompt, the configured (low) effort, no session files, no background
-// traffic. One process
-// per request, streamed; stateless follow-ups carry the transcript as text.
+// traffic. One process per request, streamed; stateless follow-ups carry the
+// transcript as text. Also runs the background fact-check (check()).
+// read_line_async is promisified in claude.js (imported below).
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -15,8 +16,6 @@ import {readAll} from './claude.js';
 Gio._promisify(Gio.Subprocess.prototype, 'wait_async');
 Gio._promisify(Gio.OutputStream.prototype, 'write_bytes_async');
 Gio._promisify(Gio.OutputStream.prototype, 'close_async');
-// Already promisified by GNOME Shell (bytes finish): lines may be bytes.
-Gio._promisify(Gio.DataInputStream.prototype, 'read_line_async');
 
 const QUIET_ENV = {
     DISABLE_AUTOUPDATER: '1',
@@ -52,8 +51,7 @@ export class CliClient {
      * @returns {Promise<{text: string}>}
      */
     async send({model, system, content: screenshot, turns, question, effort,
-        suffix = ''},
-        onText = null) {
+        suffix = ''}, onText = null, cancellable = null) {
         const content = [...screenshot];
         if (question)
             content.push({type: 'text',
@@ -64,6 +62,7 @@ export class CliClient {
             system,
             content,
             extra: ['--tools', '', '--include-partial-messages'],
+            cancellable,
         }, onText);
         const text = String(result.result ?? '').trim();
         if (!text)
@@ -73,14 +72,17 @@ export class CliClient {
 
     /**
      * Structured run (the fact-check): the answer must match schema;
-     * optional web tools, allowed without prompts.
+     * optionally WebSearch, allowed without prompts. No WebFetch: the input
+     * is a whole screen, and text on it must not be able to make a
+     * tool-using agent fetch attacker URLs (WebSearch runs server-side).
      *
      * @returns {Promise<object>} the structured output
      */
-    async check({model, effort, system, content, schema, web = true}) {
-        const tools = web ? 'WebSearch,WebFetch' : '';
+    async check({model, effort, system, content, schema, web = true,
+        cancellable = null}) {
+        const tools = web ? 'WebSearch' : '';
         const result = await this._run({
-            model, effort, system, content,
+            model, effort, system, content, cancellable,
             extra: ['--tools', tools, '--allowed-tools', tools,
                 '--permission-mode', 'dontAsk',
                 '--json-schema', JSON.stringify(schema)],
@@ -92,8 +94,8 @@ export class CliClient {
     }
 
     /** One `claude -p` process; resolves with its final "result" message. */
-    async _run({model, effort, system, content, extra, timeout},
-        onText = null) {
+    async _run({model, effort, system, content, extra, timeout,
+        cancellable = null}, onText = null) {
         const bin = this._binary;
         if (!bin)
             throw new Error('claude CLI not found');
@@ -124,12 +126,14 @@ export class CliClient {
         ]);
         this._procs.add(proc);
         let timedOut = false;
-        const timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
+        let timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
             timeout ?? this._settings.get_int('cli-timeout'), () => {
+                timer = 0; // fired: must not be removed again
                 timedOut = true;
                 proc.force_exit();
                 return GLib.SOURCE_REMOVE;
             });
+        const cancelId = cancellable?.connect(() => proc.force_exit()) ?? 0;
         let result = null;
         let stderr = '';
         try {
@@ -145,10 +149,15 @@ export class CliClient {
             stderr = await errText;
             await proc.wait_async(null);
         } finally {
-            GLib.source_remove(timer);
+            if (timer)
+                GLib.source_remove(timer);
+            if (cancelId)
+                cancellable.disconnect(cancelId);
             this._procs.delete(proc);
         }
 
+        if (cancellable?.is_cancelled())
+            throw new Error('Cancelled');
         if (!result) {
             const why = timedOut ? 'timed out'
                 : stderr.trim().split('\n').pop();

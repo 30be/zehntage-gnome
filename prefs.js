@@ -86,7 +86,7 @@ export default class ZehntagePreferences extends ExtensionPreferences {
         check.add(entryRow('Model', 'factcheck-model'));
         check.add(comboRow('Effort', 'factcheck-effort', EFFORTS));
         check.add(switchRow('Web search', 'factcheck-web',
-            'Allow it to search and fetch from the web'));
+            'Allow it to search the web (no page fetching)'));
 
         const prompt = group('Prompt', 'Sent together with every screenshot.');
         const promptView = new Gtk.TextView({

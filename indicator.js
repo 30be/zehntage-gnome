@@ -126,7 +126,8 @@ class ZehntageIndicator extends PanelMenu.Button {
     /**
      * @param {object} cb callbacks: onCapture(), onFollowUp(entry, q) ->
      *   bool (false: busy, keep the text), onRetry(entry), onStrong(entry),
-     *   onOpenPrefs(), setupHint() -> string|null, strongModel() -> id,
+     *   onCancel(entry), onOpenPrefs(), setupHint() -> string|null,
+     *   strongModel() -> id,
      *   busy(entry) -> {kind: 'initial'|'followUp'|'strong', partial}|null
      */
     _init(cb) {
@@ -163,13 +164,13 @@ class ZehntageIndicator extends PanelMenu.Button {
 
         // Scrollable history.
         this._historySection = new PopupMenu.PopupMenuSection();
-        const scrollView = new St.ScrollView({
+        this._scrollView = new St.ScrollView({
             style_class: 'zehntage-scroll',
             overlay_scrollbars: true,
         });
-        scrollView.child = this._historySection.actor;
+        this._scrollView.child = this._historySection.actor;
         const scrollItem = new PopupMenu.PopupMenuSection();
-        scrollItem.actor.add_child(scrollView);
+        scrollItem.actor.add_child(this._scrollView);
         this.menu.addMenuItem(scrollItem);
 
         this.menu.connect('open-state-changed', (_m, open) => {
@@ -185,9 +186,10 @@ class ZehntageIndicator extends PanelMenu.Button {
         this.refresh();
     }
 
-    /** Show the popup with the newest entry expanded. */
+    /** Show the popup with the newest entry expanded, scrolled to it. */
     open() {
         this._expandedId = this._entries[0]?.id ?? null;
+        this._scrollView.vadjustment.value = 0;
         if (this.menu.isOpen)
             this._render();
         else
@@ -338,11 +340,14 @@ class ZehntageIndicator extends PanelMenu.Button {
         item.add_child(this._thumbnail(entry, 48, 32, false));
         const firstLine = text => text.trim().split('\n')[0]
             .replace(/\s+/g, ' ');
+        // ⚠ also marks answers with a fact-check correction.
+        const corrected = entry.turns.some(t => t.factcheck?.significant);
         const text = entry.status === 'error'
             ? `⚠ ${firstLine(entry.error ?? 'Error')}`
             : entry.status === 'pending'
                 ? THINKING
-                : stripMd(firstLine(entry.turns[0]?.answer ?? ''));
+                : `${corrected ? '⚠ ' : ''}${
+                    stripMd(firstLine(entry.turns[0]?.answer ?? ''))}`;
         const label = new St.Label({
             text,
             style_class: 'zehntage-collapsed-label',
@@ -379,6 +384,8 @@ class ZehntageIndicator extends PanelMenu.Button {
             this._addLive(box, entry, job?.partial,
                 job?.kind === 'strong' ? `${strongName} is thinking…`
                     : THINKING);
+            if (job)
+                box.add_child(this._cancelButton(entry));
         } else if (entry.status === 'error') {
             box.add_child(wrappedLabel(
                 entry.error ?? 'Unknown error', 'zehntage-error'));
@@ -388,8 +395,8 @@ class ZehntageIndicator extends PanelMenu.Button {
             box.add_child(row);
         } else {
             this._renderTurns(box, entry, job, strongName);
-            if (!job)
-                box.add_child(this._strongButton(entry, strongName));
+            box.add_child(job ? this._cancelButton(entry)
+                : this._strongButton(entry, strongName));
             const followUp = this._followUpEntry(entry, !!job);
             box.add_child(followUp);
             this._focusTarget = followUp;
@@ -449,6 +456,11 @@ class ZehntageIndicator extends PanelMenu.Button {
     _strongButton(entry, strongName) {
         return button(strongName, () => this._cb.onStrong(entry),
             'zehntage-strong');
+    }
+
+    _cancelButton(entry) {
+        return button('Cancel', () => this._cb.onCancel(entry),
+            'zehntage-cancel');
     }
 
     _followUpEntry(entry, busy) {

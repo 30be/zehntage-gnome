@@ -89,10 +89,14 @@ export class ClaudeClient {
             `/v1/models/${encodeURIComponent(model)}`);
         const bytes = await this._session.send_and_read_async(message,
             GLib.PRIORITY_LOW, this._cancellable);
-        if (message.get_status() !== Soup.Status.OK)
-            return;
-        const info = JSON.parse(new TextDecoder().decode(bytes.toArray()));
-        const ok = info.capabilities?.thinking?.types?.disabled?.supported;
+        // Any HTTP answer is final for this session (a failed lookup must
+        // not make every send wait for another one); network errors throw
+        // and are retried.
+        let ok;
+        if (message.get_status() === Soup.Status.OK) {
+            const info = JSON.parse(new TextDecoder().decode(bytes.toArray()));
+            ok = info.capabilities?.thinking?.types?.disabled?.supported;
+        }
         // No capability info counts as yes (the Haiku default).
         this._canDisableThinking.set(model, ok ?? true);
     }
@@ -107,14 +111,16 @@ export class ClaudeClient {
      * @param {object} req {model, system, messages, effort?, thinking?}
      *   effort/thinking override the settings (the [Opus] button).
      * @param {Function} [onText] called with the answer text so far
+     * @param {Gio.Cancellable} [cancellable] aborts just this request
      * @returns {Promise<{content: object[], text: string}>} raw assistant
      *   content (kept verbatim for follow-ups) and its joined text.
      */
-    async send({model, system, messages, effort, thinking}, onText = null) {
+    async send({model, system, messages, effort, thinking}, onText = null,
+        cancellable = null) {
         if (!this.hasApiKey)
             throw new Error('Claude API key not set');
 
-        const cancellable = this._cancellable;
+        cancellable ??= this._cancellable;
         const message = this._message('POST', '/v1/messages');
         // libsoup never reuses an idle connection for a non-idempotent POST
         // unless told so; without this the warmed-up connection is wasted.

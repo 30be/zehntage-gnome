@@ -4,6 +4,7 @@ The order is the definition order; run.py resets between scenarios.
 """
 
 import base64
+import re
 import json
 import os
 import shutil
@@ -12,15 +13,15 @@ import sys
 import time
 from pathlib import Path
 
-from harness import *  # noqa: F401,F403  (helpers, Mock, constants)
 from harness import (OUT, context_image, first_content, monitor_at,  # noqa
                      monitor_px, red)
-from harness import (SUFFIX, ANSWER, REAL_HISTORY, ROOT, UUID, GLib, Mock,  # noqa
+from harness import (SUFFIX, ANSWER, REAL_HISTORY, ROOT, UUID, Mock,  # noqa
                      argval, capture, check, cyan, data_dir, decode_png,
                      entries, fake_calls, followup, full_px, hotkey,
                      labels, last_image, magenta, menu_text, noise_background,
-                     png_size, press_strong, px, reload_extension, shot, span,
-                     stage_size, state, use_cli, wait_for, wait_state)
+                     png_size, press_cancel, press_strong, px,
+                     reload_extension, shot, span, stage_size, state,
+                     use_cli, wait_for, wait_state)
 
 def t_loads(sh):
     info = sh.js('const e = zt.ext(); '
@@ -112,7 +113,7 @@ def t_followup_typed_is_append_only(sh):
     # Follow-up entry should already have key focus: just type + Enter.
     sh.js("await zt.type('und Plural?'); "
           "await zt.chord(zt.Clutter.KEY_Return);")
-    s = wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
     check(len(Mock.requests) == 2, 'follow-up not sent')
     second = Mock.requests[1]['body']
     msgs = second['messages']
@@ -189,27 +190,19 @@ def t_history_survives_reload(sh):
     wait_state(sh, lambda s: s['selector'])
     sh.js('await zt.drag(100, 100, 300, 200);')
     wait_state(sh, lambda s: s['status'] == 'ok')
-    sh.js(f'''
-        const m = zt.Main.extensionManager;
-        await m.disableExtension('{UUID}');
-        await m.enableExtension('{UUID}');
-        await zt.sleep(200);
-    ''')
+    reload_extension(sh)
     s = state(sh)
     check(s['entries'] == 1 and s['status'] == 'ok', f'history lost: {s}')
     check(s['turns'][0]['answer'] == ANSWER, 'answer lost')
 
 
 def t_no_key_shows_hint(sh):
-    sh.gset('claude-api-key', "''")
-    try:
-        hotkey(sh)
-        s = wait_state(sh, lambda s: s['menuOpen'])
-        check(not s['selector'], 'selector must not open without a key')
-        check('API key is not set' in menu_text(sh), 'no key hint')
-        shot(sh, 'no-key.png')
-    finally:
-        sh.gset('claude-api-key', "'test-key'")
+    sh.gset('claude-api-key', "''")       # reset() restores it
+    hotkey(sh)
+    s = wait_state(sh, lambda s: s['menuOpen'])
+    check(not s['selector'], 'selector must not open without a key')
+    check('API key is not set' in menu_text(sh), 'no key hint')
+    shot(sh, 'no-key.png')
 
 
 def t_prefs_dialog_opens(sh):
@@ -305,14 +298,11 @@ def t_cli_crash_shows_stderr(sh):
 
 def t_cli_missing_binary_hint(sh):
     use_cli(sh)
-    sh.gset('claude-path', "'/nonexistent/claude'")
-    try:
-        hotkey(sh)
-        s = wait_state(sh, lambda s: s['menuOpen'])
-        check(not s['selector'], 'selector must not open')
-        check('claude CLI not found' in menu_text(sh), 'no cli hint')
-    finally:
-        sh.gset('claude-path', f"'{ROOT / 'test' / 'fake-claude.py'}'")
+    sh.gset('claude-path', "'/nonexistent/claude'")   # reset() restores
+    hotkey(sh)
+    s = wait_state(sh, lambda s: s['menuOpen'])
+    check(not s['selector'], 'selector must not open')
+    check('claude CLI not found' in menu_text(sh), 'no cli hint')
 
 
 # ----- geometry / pixels
@@ -468,7 +458,6 @@ def t_hotkey_during_pending_two_entries(sh):
 # ----- disable at awkward moments (a stuck modal would freeze the shell)
 
 
-
 def t_disable_while_selecting(sh):
     hotkey(sh)
     wait_state(sh, lambda s: s['selector'])
@@ -515,7 +504,6 @@ def t_disable_during_pending_request(sh):
 # ----- history persistence
 
 
-
 def t_history_cap_evicts_images(sh):
     sh.gset('history-size', '2')
     capture(sh, 100, 100, 200, 200)
@@ -531,17 +519,36 @@ def t_history_cap_evicts_images(sh):
 
 def t_corrupt_history_recovers(sh):
     capture(sh, 100, 100, 200, 200)
+    old = sh.js('const e = zt.inst()._history.entries[0]; '
+                'return [e.imagePath, e.thumbPath, e.contextPath];')
     (data_dir() / 'history.json').write_text('{ this is not json')
-    sh.js(f"""
-        const m = zt.Main.extensionManager;
-        const i = zt.inst();
-        i._history.save = () => {{}};   // keep the garbage on disk
-        await m.disableExtension('{UUID}');
-        await m.enableExtension('{UUID}');
-        await zt.sleep(200);
-    """)
+    # keep the garbage on disk (disable would save a good history)
+    reload_extension(sh, 'zt.inst()._history.save = () => {};')
     check(state(sh)['entries'] == 0, 'garbage history should load empty')
+    bak = data_dir() / 'history.json.bak'
+    check(bak.read_text() == '{ this is not json', 'garbage not kept as .bak')
     capture(sh, 100, 100, 200, 200)
+    reload_extension(sh)
+    check(all(Path(p).exists() for p in old),
+          'images of the .bak history must stay restorable')
+
+
+def t_orphan_images_deleted_on_load(sh):
+    capture(sh, 100, 100, 200, 200)
+    d = data_dir()
+    for name in ('1-2.png', '1-2.ctx.jpg', '1-2.thumb.png'):
+        (d / name).write_bytes(b'x')
+    (d / 'mine.png').write_bytes(b'x')          # not ours: kept
+    reload_extension(sh)
+    check(not any((d / n).exists() for n in
+                  ('1-2.png', '1-2.ctx.jpg', '1-2.thumb.png')), 'orphans left')
+    e = entries(sh)[0]
+    check((d / 'mine.png').exists() and Path(e['imagePath']).exists(),
+          'deleted a file that is not an orphan')
+    check(state(sh)['entries'] == 1, 'entry lost')
+    (d / 'mine.png').unlink()
+    # Leftovers of earlier scenarios count as orphans too.
+    check(len(list(d.glob('*.thumb.png'))) == 1, list(d.iterdir()))
 
 
 def t_legacy_gemini_entry_renders_and_follows_up(sh):
@@ -693,7 +700,7 @@ def t_thin_drag_at_screen_edge_clamped(sh):
 
 
 def t_legacy_entry_uses_current_backend(sh):
-    """Gemini-era entries (no backend/model/system) on the default CLI."""
+    """Gemini-era entries (no backend/model/system) on the CLI backend."""
     use_cli(sh)
     capture(sh, 100, 100, 200, 200)
     sh.js("""
@@ -717,15 +724,13 @@ def t_legacy_entry_uses_current_backend(sh):
     check('gemini says hi' in text and '⚠' not in text, text)
 
 
-
-
 def _real_history_fingerprint():
     return sorted((f.name, f.stat().st_size, f.stat().st_mtime_ns)
                   for f in REAL_HISTORY.iterdir())
 
 
 def t_real_user_history_copy(sh):
-    """Your actual (Gemini-era) history, copied with rewritten paths."""
+    """Your actual history (any era), copied with rewritten paths."""
     src = REAL_HISTORY / 'history.json'
     if not src.exists():
         print('    (no real history on this machine; skipped)')
@@ -795,17 +800,9 @@ def t_collapsed_rows_are_single_line(sh):
     sh.js("""const e = zt.inst()._history.entries[0];
              e.error = 'API error 403: {\\n  "error": {\\n    "code": 403';""")
     capture(sh, 100, 100, 220, 200)       # newer ok entry -> first collapses
-    labels = sh.js("""
-        const out = [];
-        const walk = a => {
-            if (a.style_class === 'zehntage-collapsed-label')
-                out.push(a.get_text());
-            for (const c of a.get_children()) walk(c);
-        };
-        walk(zt.inst()._indicator.menu.box);
-        return out;""")
-    check(labels, 'no collapsed rows rendered')
-    check(all('\n' not in t for t in labels), f'multi-line row: {labels}')
+    rows = labels(sh, 'zehntage-collapsed-label')
+    check(rows, 'no collapsed rows rendered')
+    check(all('\n' not in t for t in rows), f'multi-line row: {rows}')
 
 
 def _followup_text(sh):
@@ -882,14 +879,10 @@ def t_cli_path_with_tilde(sh):
     link = home / 'my-claude'
     link.unlink(missing_ok=True)
     link.symlink_to(ROOT / 'test' / 'fake-claude.py')
-    fake = ROOT / 'test' / 'fake-claude.py'
     use_cli(sh)
-    sh.gset('claude-path', "'~/my-claude'")
-    try:
-        s = capture(sh, 100, 100, 200, 200)
-        check(s['status'] == 'ok', s)
-    finally:
-        sh.gset('claude-path', f"'{fake}'")
+    sh.gset('claude-path', "'~/my-claude'")   # reset() restores it
+    s = capture(sh, 100, 100, 200, 200)
+    check(s['status'] == 'ok', s)
 
 
 def t_capture_failure_is_visible(sh):
@@ -918,28 +911,13 @@ def t_light_and_dark_theme_screenshots(sh):
         sh.gset('color-scheme', f"'{scheme}'", 'org.gnome.desktop.interface')
         capture(sh, 100, 100, 260, 200)
         shot(sh, f'theme-{scheme}.png')
-    dim = sh.js("""
-        const out = [];
-        const walk = a => {
-            if (a.style_class === 'zehntage-answer')
-                out.push(a.get_theme_node().get_foreground_color().alpha);
-            for (const c of a.get_children()) walk(c);
-        };
-        walk(zt.inst()._indicator.menu.box);
-        return out;""")
+    dim = sh.js('''return zt.findAll(zt.inst()._indicator.menu.box,
+            a => a.style_class === 'zehntage-answer')
+        .map(a => a.get_theme_node().get_foreground_color().alpha);''')
     check(dim and all(a == 255 for a in dim), f'answer text dimmed: {dim}')
-    sh.gset('color-scheme', "'default'", 'org.gnome.desktop.interface')
 
 
 # ----- speed: streaming, thinking, warm-up
-
-def t_request_is_tuned_for_speed(sh):
-    capture(sh, 100, 100, 200, 200)
-    b = Mock.requests[0]['body']
-    check(b['stream'] is True, 'request must stream')
-    check(b.get('thinking') == {'type': 'disabled'},
-          f'thinking should be off by default: {b.get("thinking")}')
-    check(b['output_config'] == {'effort': 'low'}, b['output_config'])
 
 
 def t_thinking_switch_on(sh):
@@ -965,12 +943,22 @@ def t_warmup_connection_on_hotkey(sh):
           f'capabilities fetched again: {Mock.gets}')
 
 
+def t_failed_metadata_lookup_is_not_repeated(sh):
+    Mock.get_status = 404
+    capture(sh, 100, 100, 200, 200)
+    capture(sh, 100, 100, 220, 200)
+    # One warm-up per capture, but send() must not wait for another lookup.
+    check(len(Mock.gets) == 2, f'metadata fetched per send: {Mock.gets}')
+    check(Mock.requests[1]['body'].get('thinking') == {'type': 'disabled'},
+          'unknown capabilities count as "thinking can be off"')
+
+
 def t_no_warmup_for_cli_backend(sh):
     use_cli(sh)
     hotkey(sh)
     wait_state(sh, lambda s: s['selector'])
-    time.sleep(0.5)
-    check(not Mock.gets, f'cli backend must not touch the API: {Mock.gets}')
+    check(sh.js('return zt.inst()._claude._capsPending.size;') == 0 and
+          not Mock.gets, f'cli backend must not touch the API: {Mock.gets}')
     sh.js('await zt.chord(zt.Clutter.KEY_Escape);')
 
 
@@ -981,7 +969,6 @@ def t_streaming_shows_partial_answer(sh):
     hotkey(sh)
     wait_state(sh, lambda s: s['selector'])
     sh.js('await zt.drag(100, 100, 300, 200);')
-    end = time.time() + 5
     text = wait_for(lambda: (lambda t: t if 'ERSTER' in t else None)(
         menu_text(sh)), 10, 'no partial answer')   # 4K capture ~3 s
     check('ERSTER' in text and 'DRITTER' not in text,
@@ -1048,8 +1035,6 @@ def t_stream_setting_off(sh):
 # ----- real app windows (Wayland and X11 clients)
 
 APP = ROOT / 'test' / 'color-app.py'
-
-
 
 
 class App:
@@ -1156,17 +1141,10 @@ def t_capture_open_app_menu(sh):
         check(s['status'] == 'ok', s)
 
 
-
-
 def t_opus_button_rewrites_answer(sh):
     capture(sh, 100, 100, 200, 200)
-    label = sh.js("""return (function find(a) {
-            if (a.style_class?.includes('zehntage-strong')) return a.label;
-            for (const c of a.get_children()) {
-                const r = find(c); if (r) return r;
-            }
-            return null;
-        })(zt.inst()._indicator.menu.box);""")
+    label = sh.js('''return zt.findAll(zt.inst()._indicator.menu.box,
+            a => a.style_class?.includes('zehntage-strong'))[0]?.label;''')
     check(label == 'Opus 5.5', f'button label: {label!r}')
     press_strong(sh)
     s = wait_state(sh, lambda s: s['turns'] and
@@ -1261,7 +1239,7 @@ def t_opus_with_cli_backend(sh):
     use_cli(sh)
     capture(sh, 100, 100, 200, 200)
     press_strong(sh)
-    s = wait_state(sh, lambda s: s['turns'] and
+    wait_state(sh, lambda s: s['turns'] and
                    s['turns'][0].get('model'), timeout=8)
     argv = fake_calls()[1]['argv']
     check(argval(argv, '--model') == 'claude-opus-5-5' and
@@ -1282,7 +1260,6 @@ def t_cli_streams_partial_answer(sh):
     hotkey(sh)
     wait_state(sh, lambda s: s['selector'])
     sh.js('await zt.drag(100, 100, 300, 200);')
-    end = time.time() + 6
     text = wait_for(lambda: (lambda t: t if 'ANFANG' in t else None)(
         menu_text(sh)), 6, 'no partial CLI answer')
     check('ANFANG' in text and 'ENDE' not in text,
@@ -1291,8 +1268,7 @@ def t_cli_streams_partial_answer(sh):
     check(s['turns'][0]['answer'].endswith('ENDE'), s['turns'])
 
 
-
-# ----- correctness fixes from review
+# ----- strong model and error state
 
 def t_opus_answers_failed_followup(sh):
     Mock.status = lambda n: 529 if n == 2 else 200
@@ -1342,9 +1318,11 @@ def t_history_json_has_no_transient_state(sh):
     sh.js('zt.inst()._history.save();')   # a save while streaming
     path = data_dir() / 'history.json'
     keys = set().union(*(e.keys() for e in json.loads(path.read_text())))
-    check(not keys & {'partial', 'partialFollowUp', 'followUpPending',
-                      'upgradePending', 'partialUpgrade', 'job'},
-          f'in-flight state saved: {sorted(keys)}')
+    allowed = {'id', 'time', 'imagePath', 'mediaType', 'contextPath',
+               'contextMediaType', 'rect', 'backend', 'model', 'system',
+               'suffix', 'turns', 'status', 'error', 'thumbPath',
+               'followUpError', 'failedQuestion', 'strongError'}
+    check(keys <= allowed, f'unexpected saved keys: {sorted(keys - allowed)}')
     wait_state(sh, lambda s: s['status'] == 'ok', timeout=8)
 
 
@@ -1433,8 +1411,6 @@ def t_context_image_saved_with_entry(sh):
           e[2] == 'image/jpeg', f'context not stored: {e}')
 
 
-
-
 def t_one_word_selection(sh):
     """Select one word of a sentence: the focus image must show that word
     (white text on the fixture's dark background), not the wallpaper."""
@@ -1463,7 +1439,6 @@ def t_one_word_selection(sh):
           f'{len(pixels)} at {(wx, wy, ww, wh)}')
 
 
-
 def t_followup_suffix_pinned_and_legacy_free(sh):
     capture(sh, 100, 100, 200, 200)
     sh.gset('followup-suffix', "'(answer in English)'")   # after capture
@@ -1476,6 +1451,85 @@ def t_followup_suffix_pinned_and_legacy_free(sh):
     check(turns[1]['question'] == 'Wie ist der Plural?',
           'the suffix must not be stored or shown')
 
+
+def t_rerender_keeps_scroll_position(sh):
+    Mock.answer = lambda n, body: '\n'.join(f'Zeile {i}' for i in range(40))
+    capture(sh, 100, 100, 300, 200)
+    capture(sh, 100, 100, 320, 200)
+    probe = '''const v = zt.findAll(zt.inst()._indicator.menu.box,
+        a => a instanceof zt.St.ScrollView)[0].vadjustment;'''
+    upper = sh.js(probe + 'return v.upper - v.page_size;')
+    check(upper > 200, f'popup does not scroll: {upper}')
+    sh.js(probe + 'v.value = 150; await zt.sleep(100);')
+    Mock.chunk_delay = 0.3                 # re-render per finished answer
+    followup(sh, 'und Plural?', focus=False)
+    wait_state(sh, lambda s: len(s['turns']) == 2 and not s['busy'])
+    sh.js('await zt.sleep(200);')
+    check(sh.js(probe + 'return v.value;') == 150, 'scroll position lost')
+    sh.js('zt.inst()._indicator.menu.close(0); zt.inst()._indicator.open(); '
+          'await zt.sleep(200);')
+    check(sh.js(probe + 'return v.value;') == 0, 'reopen must start at top')
+
+
+# ----- Cancel
+
+def t_cancel_pending_answer(sh):
+    Mock.delay = 3.0
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    wait_state(sh, lambda s: s['busy'] == 'initial')
+    t = time.monotonic()
+    press_cancel(sh)
+    s = wait_state(sh, lambda s: not s['busy'], timeout=2)
+    check(time.monotonic() - t < 1, 'cancel did not abort the request')
+    check(s['status'] == 'error' and s['error'] == 'Cancelled', s)
+    check('Retry' in sh.js('''return zt.findAll(zt.inst()._indicator.menu.box,
+        a => a instanceof zt.St.Button).map(b => b.label);'''), 'no Retry')
+    Mock.delay = 0
+    sh.js('zt.inst()._askInitial(zt.inst()._history.entries[0]);')
+    s = wait_state(sh, lambda s: s['status'] == 'ok' and not s['busy'])
+    check(s['turns'][0]['answer'], s)
+
+
+def t_cancel_followup_leaves_no_trace(sh):
+    capture(sh, 100, 100, 300, 200)
+    Mock.delay = 3.0
+    followup(sh, 'und Plural?')
+    wait_state(sh, lambda s: s['busy'] == 'followUp')
+    press_cancel(sh)
+    s = wait_state(sh, lambda s: not s['busy'], timeout=2)
+    check(s['status'] == 'ok' and len(s['turns']) == 1 and
+          not s['followUpError'], s)
+    check(sh.js('return zt.inst()._history.entries[0].failedQuestion '
+                '?? null;') is None, '[Opus] would answer a cancelled question')
+
+
+def t_cancel_kills_cli(sh):
+    use_cli(sh, 'hang')
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 300, 200);')
+    wait_for(lambda: (Path(os.environ['ZT_FAKE_DIR']) / 'hang.pid')
+             .exists(), 10, 'claude not started')
+    wait_state(sh, lambda s: s['busy'] == 'initial')
+    pid = int((Path(os.environ['ZT_FAKE_DIR']) / 'hang.pid').read_text())
+    press_cancel(sh)
+    s = wait_state(sh, lambda s: not s['busy'], timeout=3)
+    check(s['error'] == 'Cancelled', s)
+    wait_for(lambda: not Path(f'/proc/{pid}').exists() or
+             'zombie' in Path(f'/proc/{pid}/status').read_text().lower(),
+             3, 'claude process survived cancel')
+
+
+def t_collapsed_row_marks_correction(sh):
+    _factcheck(sh, 'error')
+    capture(sh, 100, 100, 300, 200)
+    _checked(sh)
+    sh.gset('factcheck', 'false')
+    capture(sh, 100, 100, 320, 200)        # expands the newer entry
+    rows = labels(sh, 'zehntage-collapsed-label')
+    check(rows and rows[0].startswith('⚠ '), rows)
 
 
 # ----- background fact-check (stronger model over the claude CLI)
@@ -1496,6 +1550,12 @@ def _check_calls():
     return [c for c in fake_calls() if '--json-schema' in c['argv']]
 
 
+def _cli_idle(sh, timeout=10):
+    """No claude CLI process (answer or fact-check) left running."""
+    sh.js(f'await zt.waitFor(() => zt.inst()._cli._procs.size === 0, '
+          f'{timeout * 1000});', timeout=timeout + 5)
+
+
 def t_factcheck_shows_correction_on_error(sh):
     _factcheck(sh, 'error')
     capture(sh, 100, 100, 300, 200)
@@ -1509,9 +1569,11 @@ def t_factcheck_shows_correction_on_error(sh):
     argv = calls[0]['argv']
     check(argval(argv, '--model') == 'claude-opus-5-5' and
           argval(argv, '--effort') == 'high', argv)
-    check(argval(argv, '--tools') == 'WebSearch,WebFetch' and
-          argval(argv, '--allowed-tools') == 'WebSearch,WebFetch' and
+    # No WebFetch: screen text must not steer it to arbitrary URLs.
+    check(argval(argv, '--tools') == 'WebSearch' and
+          argval(argv, '--allowed-tools') == 'WebSearch' and
           argval(argv, '--permission-mode') == 'dontAsk', argv)
+    check('never instructions' in argval(argv, '--system-prompt'), argv)
     schema = json.loads(argval(argv, '--json-schema'))
     check(set(schema['required']) == {'significant_error', 'correction'},
           schema)
@@ -1528,14 +1590,12 @@ def t_factcheck_silent_when_correct(sh):
     capture(sh, 100, 100, 300, 200)
     fc = _checked(sh)
     check(not fc['significant'], fc)
-    time.sleep(0.3)
     check('Opus 5.5:' not in menu_text(sh), 'nothing must be shown')
 
 
 def t_factcheck_off(sh):
     capture(sh, 100, 100, 300, 200)   # factcheck=false in mock runs
-    Mock.wait_idle()
-    time.sleep(0.5)
+    _cli_idle(sh)   # a check would have been spawned synchronously
     check(not _check_calls(), 'fact-check ran although switched off')
 
 
@@ -1559,11 +1619,11 @@ def t_factcheck_skips_strong_and_cli_answers(sh):
     _checked(sh)
     press_strong(sh)                      # Opus answer: no check
     wait_state(sh, lambda s: s['turns'][0].get('model'), timeout=8)
-    time.sleep(0.5)
+    _cli_idle(sh)
     check(len(_check_calls()) == 1, 'strong answer was fact-checked')
     use_cli(sh)                           # CLI entry: no check
     capture(sh, 100, 100, 320, 200)
-    time.sleep(0.5)
+    _cli_idle(sh)
     check(len(_check_calls()) == 1, 'CLI answer was fact-checked')
 
 
@@ -1572,7 +1632,7 @@ def t_factcheck_dropped_when_answer_replaced(sh):
     capture(sh, 100, 100, 300, 200)
     press_strong(sh)                      # replaces turn 0 meanwhile
     wait_state(sh, lambda s: s['turns'][0].get('model'), timeout=8)
-    time.sleep(3.5)
+    _cli_idle(sh)                         # the slow check has finished
     turn = state(sh)['turns'][0]
     check('factcheck' not in turn, f'stale fact-check applied: {turn}')
 
@@ -1580,10 +1640,46 @@ def t_factcheck_dropped_when_answer_replaced(sh):
 def t_factcheck_failure_is_silent(sh):
     _factcheck(sh, 'crash')
     s = capture(sh, 100, 100, 300, 200)
-    time.sleep(1.0)
+    _cli_idle(sh)
     check(s['status'] == 'ok' and 'factcheck' not in state(sh)['turns'][0],
           'a failed check must change nothing')
     check('Opus 5.5:' not in menu_text(sh), 'nothing must be shown')
+
+
+def t_factcheck_pauses_on_usage_limit(sh):
+    _factcheck(sh, 'limit')
+    capture(sh, 100, 100, 300, 200)
+    wait_for(lambda: sh.js('return zt.inst()._checkPausedUntil > 0;'), 10,
+             'usage limit did not pause fact-checks')
+    check(any('fact-check paused' in t for t in sh.js(
+        'return zt.Main.messageTray.getSources().flatMap(s => '
+        's.notifications.map(n => n.title));')), 'user was not told')
+    _cli_idle(sh)
+    capture(sh, 100, 100, 320, 200)
+    _cli_idle(sh)
+    check(len(_check_calls()) == 1, 'checked again while paused')
+
+
+def t_factcheck_one_at_a_time(sh):
+    _factcheck(sh, 'slow 20')             # outlasts the 2nd capture on 4K
+    capture(sh, 100, 100, 300, 200)
+    wait_for(lambda: len(_check_calls()) == 1, 5, 'first check not started')
+    (Path(os.environ['ZT_FAKE_DIR']) / 'factcheck').write_text('error')
+    capture(sh, 100, 100, 320, 200)
+    _checked(sh)                          # the newer one finishes
+    _cli_idle(sh)
+    check(sh.js('return zt.inst()._cli._procs.size;') == 0, 'leaked proc')
+    older = sh.js('return zt.inst()._history.entries[1].turns[0];')
+    check('factcheck' not in older, f'superseded check applied: {older}')
+
+
+def t_factcheck_skipped_when_images_gone(sh):
+    capture(sh, 100, 100, 300, 200)
+    _factcheck(sh, 'ok')
+    Path(entries(sh)[0]['imagePath']).unlink()
+    sh.js('const i = zt.inst(), e = i._history.entries[0]; '
+          'i._factCheck(e, e.turns[0]);')   # must not throw
+    check(not _check_calls(), 'checked without images')
 
 
 def t_factcheck_survives_reload(sh):
@@ -1593,7 +1689,6 @@ def t_factcheck_survives_reload(sh):
     reload_extension(sh)
     sh.js('zt.inst()._indicator.menu.open(0); await zt.sleep(200);')
     check('«ест», а не «пьёт»' in menu_text(sh), 'correction lost on reload')
-
 
 
 def t_cli_large_stdin_arrives_intact(sh):
@@ -1611,6 +1706,30 @@ def t_cli_large_stdin_arrives_intact(sh):
     for block, path in zip(images, e):
         check(base64.b64decode(block['source']['data']) ==
               Path(path).read_bytes(), f'{path}: bytes differ')
+
+
+def _rss_mb(sh):
+    """gnome-shell resident memory after a forced GC."""
+    sh.js('imports.system.gc(); await zt.sleep(300); imports.system.gc();')
+    status = Path(f'/proc/{sh.proc.pid}/status').read_text()
+    return int(re.search(r'VmRSS:\s+(\d+)', status).group(1)) / 1024
+
+
+def t_memory_does_not_grow_with_captures(sh):
+    """Full-res monitor captures are big: none may stay alive. With a
+    history cap of 5, memory must plateau instead of growing per capture."""
+    sh.gset('history-size', '5')
+    for i in range(6):                       # warm-up: fill caches/history
+        capture(sh, 100 + i, 100, 400, 300)
+    sizes = [_rss_mb(sh)]
+    for _ in range(4):
+        for i in range(10):
+            capture(sh, 100 + i, 100, 400, 300)
+        sizes.append(_rss_mb(sh))
+    print('    RSS per 10 captures: ' + ' -> '.join(f'{v:.0f}' for v in sizes)
+          + ' MB')
+    check(sizes[-1] - sizes[1] < 40,
+          f'still growing after the caches filled: {sizes}')
 
 
 SCENARIOS = [v for k, v in list(globals().items()) if k.startswith('t_')]

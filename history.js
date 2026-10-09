@@ -10,6 +10,9 @@ Gio._promisify(GdkPixbuf.Pixbuf, 'new_from_stream_at_scale_async',
     'new_from_stream_finish');
 Gio._promisify(Gio.File.prototype, 'read_async');
 
+// Files addEntry writes: <id>.png|jpg, <id>.ctx.png|jpg, <id>.thumb.png.
+const OWN_FILE = /^\d+-\d+(\.ctx|\.thumb)?\.(png|jpg)$/;
+
 // Thumbnail box at 2x, so previews stay sharp on HiDPI.
 export const THUMB_W = 640;
 export const THUMB_H = 280;
@@ -94,18 +97,45 @@ export class History {
     }
 
     _load() {
+        let list;
         try {
-            const [ok, data] = GLib.file_get_contents(this._jsonPath);
-            if (!ok)
-                return [];
-            const list = JSON.parse(new TextDecoder().decode(data));
+            const [, data] = GLib.file_get_contents(this._jsonPath);
+            list = JSON.parse(new TextDecoder().decode(data));
             if (!Array.isArray(list))
+                throw new Error('not a list');
+        } catch (e) {
+            if (!GLib.file_test(this._jsonPath, GLib.FileTest.EXISTS))
                 return [];
-            for (const entry of list)
-                this._migrate(entry);
-            return list;
-        } catch {
+            // Keep it for inspection instead of overwriting it on next save.
+            console.error(`zehntage-gnome: unreadable history (${e}), ` +
+                'moved to history.json.bak');
+            GLib.rename(this._jsonPath, `${this._jsonPath}.bak`);
             return [];
+        }
+        for (const entry of list)
+            this._migrate(entry);
+        // A .bak still references its images: keep them restorable.
+        if (!GLib.file_test(`${this._jsonPath}.bak`, GLib.FileTest.EXISTS))
+            this._deleteOrphans(list);
+        return list;
+    }
+
+    /** Our image files no entry references (e.g. lost by a crash). */
+    _deleteOrphans(list) {
+        const used = new Set(list.flatMap(e =>
+            [e.imagePath, e.thumbPath, e.contextPath]));
+        const dir = Gio.File.new_for_path(this._dir);
+        try {
+            const files = dir.enumerate_children('standard::name',
+                Gio.FileQueryInfoFlags.NONE, null);
+            for (const info of files) {
+                const name = info.get_name();
+                const file = dir.get_child(name);
+                if (OWN_FILE.test(name) && !used.has(file.get_path()))
+                    file.delete(null);
+            }
+        } catch (e) {
+            console.warn(`zehntage-gnome: orphan cleanup failed: ${e}`);
         }
     }
 
@@ -151,7 +181,7 @@ export class History {
             model,
             system,
             suffix,
-            turns: [],          // [{question?, answer, content?, model?}]
+            turns: [],          // [{question?, answer, content?, model?, factcheck?}]
             status: 'pending',  // pending | ok | error
             error: null,
         };

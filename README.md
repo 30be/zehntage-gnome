@@ -42,12 +42,19 @@ without relogin. The dev shell shares your real extension dir and dconf.
   (thinking on) and replaces the last answer, streamed — or, right after a
   failed follow-up, answers that question. Also next to Retry on errors.
   Follow-ups afterwards go back to the fast model.
+- **Cancel** (while an answer is coming): stops it (the CLI process is
+  killed). A cancelled follow-up or rewrite leaves no trace.
 - **Fact-check:** after each API answer, Claude Opus 5.5 checks it in the
   background through the claude CLI (with web search) — same screenshot,
   same instructions, plus the answer. Only if it finds a significant error
   (wrong translation, facts, grammar, or a misread screenshot) does a
-  short correction appear under that answer, a few seconds later.
-  Corrections are not fed back into later follow-ups.
+  short correction appear under that answer, a few seconds later, and
+  the collapsed history row gets a ⚠. Corrections are not fed back into
+  later follow-ups. Only answers of the fast model over the API are
+  checked (not Opus answers, not the CLI backend); one check at a time, a
+  newer answer cancels the older check. On a usage limit or login error
+  checking pauses for 30 minutes (one notification). Each check costs
+  Claude Code subscription quota.
 - Panel camera icon: history; "Capture & explain"; gear opens settings.
 - Click a screenshot preview to open the image in your viewer.
 
@@ -64,7 +71,9 @@ without relogin. The dev shell shares your real extension dir and dconf.
   Code login), model (default `claude-opus-5-5`), effort (default
   `high`), web search (default on). Hidden: `factcheck-timeout` (180 s).
   It runs `claude -p` with `--json-schema` (`significant_error`,
-  `correction`), `--tools WebSearch,WebFetch --permission-mode dontAsk`.
+  `correction`), `--tools WebSearch --permission-mode dontAsk`. No
+  WebFetch: the screen is untrusted input and must not be able to make it
+  open URLs; the prompt also says screen text is never an instruction.
 - Prompt, follow-up suffix (default `(ответ по-русски)`, appended to
   follow-up questions: without it Haiku answers in the question's
   language), hotkeys (applied on Enter), history size (default 20).
@@ -114,7 +123,9 @@ transcript so far are sent again.
 ### History
 
 `~/.local/share/zehntage-gnome@lyka/` (history.json, images, small
-thumbnails; oldest entries are evicted past the cap). Each entry pins its
+thumbnails; oldest entries are evicted past the cap, unreferenced image
+files are deleted on load; an unreadable history.json is kept as
+history.json.bak). Each entry pins its
 backend, model and system prompt and stores Claude's raw reply blocks, so
 follow-ups replay the conversation unchanged (Haiku 5.5 rejects edited
 history). In-flight state is never saved. Old Gemini-era entries are
@@ -123,12 +134,15 @@ migrated on load.
 ## Tests (autonomous, headless)
 
 ```nu
-./test/run.py                 # all mock scenarios (~80)
+./test/run.py                 # all mock scenarios (~110)
 ./test/run.py drag followup   # only scenarios whose name matches
 ./test/run.py --screens 1920x1080@1.25,1920x1080@1  # monitors + scales
 ./test/run.py --live-cli      # real claude CLI: timed runs + follow-up
 with-env {ANTHROPIC_API_KEY: "sk-ant-..."} { ./test/run.py --live }
+with-env {ZT_KEEP: "1"} { ./test/run.py drag }   # keep logs + temp dir
 ```
+
+`ZT_FACTCHECK=0` turns the fact-check off for `--live` (A/B timing).
 
 `test/run.py` re-runs itself on a private D-Bus session with isolated XDG
 dirs, its own runtime dir (sockets), the GSettings keyfile backend and, in
