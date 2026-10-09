@@ -16,6 +16,23 @@ import {Indicator} from './indicator.js';
 import {AreaSelector} from './selector.js';
 
 const KEYBINDING = 'capture-hotkey';
+const FACTCHECK_PROMPT = 'You fact-check another model\'s answer about a ' +
+    'screenshot. Report only significant errors: a wrong translation or ' +
+    'meaning, wrong facts, a wrong grammar explanation, or misreading the ' +
+    'screenshot. Ignore style, brevity, omissions and debatable nuances. ' +
+    'Search the web when unsure about a fact. If there is a significant ' +
+    'error, the correction says only what is wrong and what is right (do ' +
+    'not repeat correct parts), in Russian, at most 3 short lines, light ' +
+    'Markdown.';
+const FACTCHECK_SCHEMA = {
+    type: 'object',
+    properties: {
+        significant_error: {type: 'boolean'},
+        correction: {type: 'string'},
+    },
+    required: ['significant_error', 'correction'],
+    additionalProperties: false,
+};
 const MENU_SETTLE_MS = 120; // let a closed menu disappear from the frame
 
 export default class ZehntageExtension extends Extension {
@@ -186,6 +203,8 @@ export default class ZehntageExtension extends Extension {
                 entry.turns = [{answer: text, content,
                     ...strong ? {model} : {}}];
                 entry.status = 'ok';
+                if (!strong)
+                    this._factCheck(entry, entry.turns[0]);
             },
             error => {
                 entry.status = 'error';
@@ -199,8 +218,11 @@ export default class ZehntageExtension extends Extension {
         this._clearErrors(entry);
         return this._run(entry, 'followUp',
             onText => this._ask(entry, {question, onText}),
-            ({content, text}) => entry.turns.push({question, answer: text,
-                content}),
+            ({content, text}) => {
+                const turn = {question, answer: text, content};
+                entry.turns.push(turn);
+                this._factCheck(entry, turn);
+            },
             error => {
                 // Shown in the UI but never sent back to the API; [Opus]
                 // can answer it instead.
@@ -240,6 +262,56 @@ export default class ZehntageExtension extends Extension {
                 if (failed)
                     entry.failedQuestion = failed;
             });
+    }
+
+    /**
+     * Background fact-check of a fast-model API answer by a stronger model
+     * over the claude CLI (optionally with web search). The result lands on
+     * that turn; the popup shows it only for a significant error.
+     */
+    _factCheck(entry, turn) {
+        if (!this._settings || entry.backend !== 'api' ||
+            !this._settings.get_boolean('factcheck') || !this._cli.available)
+            return;
+        const model = this._settings.get_string('factcheck-model').trim() ||
+            DEFAULT_STRONG_MODEL;
+        const index = entry.turns.indexOf(turn);
+        const lines = ['The assistant (Claude) was given the screenshot ' +
+            'above with these instructions:', entry.system, ''];
+        for (const t of entry.turns.slice(0, index)) {
+            if (t.question)
+                lines.push(`User: ${t.question}`);
+            lines.push(`Assistant: ${t.answer}`);
+        }
+        lines.push(turn.question ? `User: ${turn.question}`
+            : 'User: (no question: explain the selection)',
+        `Assistant's answer to check:\n${turn.answer}`, '',
+        'Check only this last answer.');
+        const cli = this._cli;
+        cli.check({
+            model,
+            effort: this._settings.get_string('factcheck-effort'),
+            system: FACTCHECK_PROMPT,
+            content: [...this._screenshotContent(entry),
+                {type: 'text', text: lines.join('\n')}],
+            schema: FACTCHECK_SCHEMA,
+            web: this._settings.get_boolean('factcheck-web'),
+        }).then(res => {
+            // Replaced meanwhile ([Opus] rewrite) or disabled: drop it.
+            if (!this._history || !entry.turns.includes(turn))
+                return;
+            const correction = String(res.correction ?? '').trim();
+            turn.factcheck = {
+                significant: !!res.significant_error && correction !== '',
+                correction, model,
+            };
+            this._history.save();
+            if (turn.factcheck.significant)
+                this._indicator?.refresh();
+        }).catch(e => {
+            if (this._cli === cli)   // not just killed by disable()
+                console.log(`zehntage: fact-check failed: ${e.message}`);
+        });
     }
 
     _clearErrors(entry) {

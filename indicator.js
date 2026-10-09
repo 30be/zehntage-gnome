@@ -419,6 +419,19 @@ class ZehntageIndicator extends PanelMenu.Button {
                 box.add_child(wrappedLabel(`— ${modelName(turn.model)}`,
                     'zehntage-model-tag'));
             }
+            // Only significant errors reach the user.
+            if (turn.factcheck?.significant) {
+                const fix = new St.BoxLayout({
+                    orientation: Clutter.Orientation.VERTICAL,
+                    style_class: 'zehntage-factcheck',
+                });
+                fix.add_child(wrappedLabel(
+                    `⚠ ${modelName(turn.factcheck.model)}:`,
+                    'zehntage-factcheck-title'));
+                fix.add_child(wrappedLabel(turn.factcheck.correction,
+                    'zehntage-answer', true));
+                box.add_child(fix);
+            }
         });
         if (entry.strongError) {
             box.add_child(wrappedLabel(`⚠ ${strongName}: ${entry.strongError}`,

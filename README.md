@@ -42,6 +42,12 @@ without relogin. The dev shell shares your real extension dir and dconf.
   (thinking on) and replaces the last answer, streamed — or, right after a
   failed follow-up, answers that question. Also next to Retry on errors.
   Follow-ups afterwards go back to the fast model.
+- **Fact-check:** after each API answer, Claude Opus 5.5 checks it in the
+  background through the claude CLI (with web search) — same screenshot,
+  same instructions, plus the answer. Only if it finds a significant error
+  (wrong translation, facts, grammar, or a misread screenshot) does a
+  short correction appear under that answer, a few seconds later.
+  Corrections are not fed back into later follow-ups.
 - Panel camera icon: history; "Capture & explain"; gear opens settings.
 - Click a screenshot preview to open the image in your viewer.
 
@@ -54,6 +60,11 @@ without relogin. The dev shell shares your real extension dir and dconf.
   (default `low`), whole screen as context (default on), streaming
   (default on), thinking (default off).
 - Opus button: model (default `claude-opus-5-5`), effort (default `high`).
+- Fact-check: on/off (default on, needs the claude CLI and your Claude
+  Code login), model (default `claude-opus-5-5`), effort (default
+  `high`), web search (default on). Hidden: `factcheck-timeout` (180 s).
+  It runs `claude -p` with `--json-schema` (`significant_error`,
+  `correction`), `--tools WebSearch,WebFetch --permission-mode dontAsk`.
 - Prompt, follow-up suffix (default `(ответ по-русски)`, appended to
   follow-up questions: without it Haiku answers in the question's
   language), hotkeys (applied on Enter), history size (default 20).

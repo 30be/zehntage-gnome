@@ -754,5 +754,5 @@ def reset(sh):
     Mock.reset()
     sh.reset_settings()
     fake = Path(os.environ['ZT_FAKE_DIR'])
-    for f in ('mode', 'calls.jsonl'):
+    for f in ('mode', 'factcheck', 'calls.jsonl'):
         (fake / f).unlink(missing_ok=True)

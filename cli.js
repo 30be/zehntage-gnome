@@ -8,11 +8,12 @@
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import GLibUnix from 'gi://GLibUnix';
 
 import {readAll} from './claude.js';
 
 Gio._promisify(Gio.Subprocess.prototype, 'wait_async');
-Gio._promisify(Gio.OutputStream.prototype, 'write_all_async');
+Gio._promisify(Gio.OutputStream.prototype, 'write_bytes_async');
 Gio._promisify(Gio.OutputStream.prototype, 'close_async');
 // Already promisified by GNOME Shell (bytes finish): lines may be bytes.
 Gio._promisify(Gio.DataInputStream.prototype, 'read_line_async');
@@ -53,14 +54,49 @@ export class CliClient {
     async send({model, system, content: screenshot, turns, question, effort,
         suffix = ''},
         onText = null) {
-        const bin = this._binary;
-        if (!bin)
-            throw new Error('claude CLI not found');
-
         const content = [...screenshot];
         if (question)
             content.push({type: 'text',
                 text: transcript(turns, question, suffix)});
+        const result = await this._run({
+            model,
+            effort: effort ?? this._settings.get_string('effort'),
+            system,
+            content,
+            extra: ['--tools', '', '--include-partial-messages'],
+        }, onText);
+        const text = String(result.result ?? '').trim();
+        if (!text)
+            throw new Error('Empty answer from claude CLI');
+        return {text};
+    }
+
+    /**
+     * Structured run (the fact-check): the answer must match schema;
+     * optional web tools, allowed without prompts.
+     *
+     * @returns {Promise<object>} the structured output
+     */
+    async check({model, effort, system, content, schema, web = true}) {
+        const tools = web ? 'WebSearch,WebFetch' : '';
+        const result = await this._run({
+            model, effort, system, content,
+            extra: ['--tools', tools, '--allowed-tools', tools,
+                '--permission-mode', 'dontAsk',
+                '--json-schema', JSON.stringify(schema)],
+            timeout: this._settings.get_int('factcheck-timeout'),
+        });
+        if (!result.structured_output)
+            throw new Error('claude CLI: no structured output');
+        return result.structured_output;
+    }
+
+    /** One `claude -p` process; resolves with its final "result" message. */
+    async _run({model, effort, system, content, extra, timeout},
+        onText = null) {
+        const bin = this._binary;
+        if (!bin)
+            throw new Error('claude CLI not found');
         const input = `${JSON.stringify({
             type: 'user',
             message: {role: 'user', content},
@@ -77,20 +113,19 @@ export class CliClient {
         const proc = launcher.spawnv([bin, '-p',
             '--safe-mode',
             '--model', model,
-            '--effort', effort ?? this._settings.get_string('effort'),
-            '--tools', '',
+            '--effort', effort,
             '--strict-mcp-config',
             '--no-session-persistence',
             '--input-format', 'stream-json',
             '--output-format', 'stream-json',
             '--verbose',
-            '--include-partial-messages',
+            ...extra,
             '--system-prompt', system,
         ]);
         this._procs.add(proc);
         let timedOut = false;
         const timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
-            this._settings.get_int('cli-timeout'), () => {
+            timeout ?? this._settings.get_int('cli-timeout'), () => {
                 timedOut = true;
                 proc.force_exit();
                 return GLib.SOURCE_REMOVE;
@@ -100,12 +135,13 @@ export class CliClient {
         try {
             // Write stdin while already reading stdout: a multi-MB image
             // must not deadlock against a full stdout pipe.
+            // EPIPE if claude dies early: handled now, not when awaited.
             const writing = writeAll(proc.get_stdin_pipe(),
-                new TextEncoder().encode(input));
+                new TextEncoder().encode(input)).catch(() => {});
             const errText = readAll(proc.get_stderr_pipe())
                 .catch(e => `(stderr unreadable: ${e.message})`);
             result = await readStream(proc.get_stdout_pipe(), onText);
-            await writing.catch(() => {}); // EPIPE if claude died early
+            await writing;
             stderr = await errText;
             await proc.wait_async(null);
         } finally {
@@ -118,12 +154,11 @@ export class CliClient {
                 : stderr.trim().split('\n').pop();
             throw new Error(`claude CLI failed: ${why || 'no result'}`);
         }
-        const text = String(result.result ?? '').trim();
-        if (result.is_error || result.subtype !== 'success')
-            throw new Error(`claude CLI: ${text || result.subtype}`);
-        if (!text)
-            throw new Error('Empty answer from claude CLI');
-        return {text};
+        if (result.is_error || result.subtype !== 'success') {
+            throw new Error(`claude CLI: ${
+                String(result.result ?? '').trim() || result.subtype}`);
+        }
+        return result;
     }
 
     destroy() {
@@ -134,9 +169,22 @@ export class CliClient {
     }
 }
 
-async function writeAll(stream, bytes) {
+async function writeAll(stream, data) {
+    // Gio.Subprocess's stdin pipe is a blocking fd, and GIO's async write on
+    // a pipe first writes in the calling thread: it would block the whole
+    // shell until claude starts reading (~0.3 s of Node start-up). So make
+    // it non-blocking — and then hand GIO a GLib.Bytes, which it keeps a
+    // reference to: a plain Uint8Array is only valid during the call, so
+    // the part written later (past the 64 KB pipe buffer) would be garbage.
+    GLibUnix.set_fd_nonblocking(stream.get_fd(), true);
+    let bytes = new GLib.Bytes(data);
     try {
-        await stream.write_all_async(bytes, GLib.PRIORITY_DEFAULT, null);
+        while (bytes.get_size() > 0) {
+            const n = await stream.write_bytes_async(bytes,
+                GLib.PRIORITY_DEFAULT, null);
+            bytes = GLib.Bytes.new_from_bytes(bytes, n,
+                bytes.get_size() - n);
+        }
     } finally {
         await stream.close_async(GLib.PRIORITY_DEFAULT, null).catch(() => {});
     }

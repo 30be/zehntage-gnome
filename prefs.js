@@ -77,6 +77,17 @@ export default class ZehntagePreferences extends ExtensionPreferences {
         strong.add(entryRow('Model', 'strong-model'));
         strong.add(comboRow('Effort', 'strong-effort', EFFORTS));
 
+        const check = group('Fact-check',
+            'After each API answer, a stronger model checks it in the ' +
+            'background (claude CLI). A correction appears only for ' +
+            'significant errors.');
+        check.add(switchRow('Fact-check', 'factcheck',
+            'Needs the claude CLI and your Claude Code login'));
+        check.add(entryRow('Model', 'factcheck-model'));
+        check.add(comboRow('Effort', 'factcheck-effort', EFFORTS));
+        check.add(switchRow('Web search', 'factcheck-web',
+            'Allow it to search and fetch from the web'));
+
         const prompt = group('Prompt', 'Sent together with every screenshot.');
         const promptView = new Gtk.TextView({
             wrap_mode: Gtk.WrapMode.WORD_CHAR,

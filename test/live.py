@@ -64,6 +64,21 @@ def live_api(sh):
     check(s['status'] == 'ok', s['error'])
     print(f'    one word ("frisst"), with context: {time.time() - t0:.2f}s  '
           f'{s["turns"][0]["answer"][:110]!r}')
+    # Background fact-check by the real Opus over the real claude CLI.
+    fc = None
+    if sh.js("return zt.setting('org.gnome.shell.extensions.zehntage-gnome', "
+             "'factcheck');") == 'false':
+        print('    (fact-check off)')
+        fc = {'skip': True}
+    while time.time() - t0 < 180 and not fc:
+        fc = sh.js('return zt.inst()._history.entries[0]?.turns[0]'
+                   '?.factcheck ?? null;')
+        time.sleep(0.5)
+    check(fc, 'no fact-check result within 180 s')
+    if not fc.get('skip'):
+        print(f'    fact-check ({fc["model"]}): {time.time() - t0:.1f}s '
+              f'after release, significant={fc["significant"]} '
+              f'{fc["correction"][:100]!r}')
     t0 = time.time()
     sh.js("await zt.type('Wie ist der Plural?'); "
           "await zt.chord(zt.Clutter.KEY_Return);")

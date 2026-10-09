@@ -2,7 +2,9 @@
 """Stand-in for `claude -p` in tests: logs each call, answers stream-json.
 
 ZT_FAKE_DIR (from the test shell's environment) holds `mode`
-(ok | error | crash | garbage | hang | slowstream) and receives one calls.jsonl line per invocation.
+(ok | error | crash | garbage | hang | slowstream) and `factcheck` (ok | error |
+crash | slow, for --json-schema runs), and receives one calls.jsonl line per
+invocation.
 """
 
 import json
@@ -22,6 +24,23 @@ with open(d / 'calls.jsonl', 'a') as f:
     }) + '\n')
 n = sum(1 for _ in open(d / 'calls.jsonl'))
 
+if '--json-schema' in sys.argv:   # the fact-check
+    fc = d / 'factcheck'
+    fmode = fc.read_text().strip() if fc.exists() else 'ok'
+    if fmode == 'crash':
+        print('Error: fact-check exploded', file=sys.stderr)
+        sys.exit(1)
+    if fmode == 'slow':
+        import time
+        time.sleep(3)
+    out = {'significant_error': fmode == 'error',
+           'correction': '**frisst** значит «ест», а не «пьёт».'
+           if fmode == 'error' else ''}
+    print(json.dumps({'type': 'system', 'subtype': 'init'}))
+    print(json.dumps({'type': 'result', 'subtype': 'success',
+                      'is_error': False, 'result': json.dumps(out),
+                      'structured_output': out}), flush=True)
+    sys.exit(0)
 if mode == 'hang':
     import time
     (d / 'hang.pid').write_text(str(os.getpid()))

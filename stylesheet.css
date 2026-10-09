@@ -111,3 +111,16 @@
     font-style: italic;
     color: #8a8a8a;
 }
+
+.zehntage-factcheck {
+    margin-top: 4px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background-color: rgba(229, 165, 10, 0.14);
+    spacing: 2px;
+}
+
+.zehntage-factcheck-title {
+    font-weight: bold;
+    color: #e5a50a;
+}

@@ -65,6 +65,34 @@
       <default>'high'</default>
       <summary>Effort for the [Opus] button (thinking always on)</summary>
     </key>
+    <key name="factcheck" type="b">
+      <default>true</default>
+      <summary>Fact-check API answers in the background via the claude CLI; show a correction only for significant errors</summary>
+    </key>
+    <key name="factcheck-model" type="s">
+      <default>'claude-opus-5-5'</default>
+      <summary>Model for the fact-check (claude CLI)</summary>
+    </key>
+    <key name="factcheck-effort" type="s">
+      <choices>
+        <choice value="low"/>
+        <choice value="medium"/>
+        <choice value="high"/>
+        <choice value="xhigh"/>
+        <choice value="max"/>
+      </choices>
+      <default>'high'</default>
+      <summary>Effort for the fact-check</summary>
+    </key>
+    <key name="factcheck-web" type="b">
+      <default>true</default>
+      <summary>Let the fact-check search and fetch from the web</summary>
+    </key>
+    <key name="factcheck-timeout" type="i">
+      <default>180</default>
+      <range min="10" max="900"/>
+      <summary>Kill a fact-check after this many seconds</summary>
+    </key>
     <key name="api-base-url" type="s">
       <default>'https://api.anthropic.com'</default>
       <summary>API base URL (override for tests)</summary>

@@ -1477,4 +1477,140 @@ def t_followup_suffix_pinned_and_legacy_free(sh):
           'the suffix must not be stored or shown')
 
 
+
+# ----- background fact-check (stronger model over the claude CLI)
+
+def _factcheck(sh, mode):
+    (Path(os.environ['ZT_FAKE_DIR']) / 'factcheck').write_text(mode)
+    sh.gset('factcheck', 'true')
+
+
+def _checked(sh, turn=0, timeout=10):
+    """Wait until that turn has a fact-check result; returns it."""
+    return wait_for(lambda: sh.js(
+        f'return zt.inst()._history.entries[0]?.turns[{turn}]?.factcheck '
+        '?? null;'), timeout, f'turn {turn} never got a fact-check')
+
+
+def _check_calls():
+    return [c for c in fake_calls() if '--json-schema' in c['argv']]
+
+
+def t_factcheck_shows_correction_on_error(sh):
+    _factcheck(sh, 'error')
+    capture(sh, 100, 100, 300, 200)
+    fc = _checked(sh)
+    check(fc['significant'] and 'пьёт' in fc['correction'] and
+          fc['model'] == 'claude-opus-5-5', fc)
+    wait_for(lambda: 'Opus 5.5:' in menu_text(sh), 5, 'correction not shown')
+    check('«ест», а не «пьёт»' in menu_text(sh), menu_text(sh))
+    calls = _check_calls()
+    check(len(calls) == 1, f'{len(calls)} fact-check runs')
+    argv = calls[0]['argv']
+    check(argval(argv, '--model') == 'claude-opus-5-5' and
+          argval(argv, '--effort') == 'high', argv)
+    check(argval(argv, '--tools') == 'WebSearch,WebFetch' and
+          argval(argv, '--allowed-tools') == 'WebSearch,WebFetch' and
+          argval(argv, '--permission-mode') == 'dontAsk', argv)
+    schema = json.loads(argval(argv, '--json-schema'))
+    check(set(schema['required']) == {'significant_error', 'correction'},
+          schema)
+    content = json.loads(calls[0]['stdin'])['message']['content']
+    check(sum(b['type'] == 'image' for b in content) == 2,
+          'fact-check must see the same screenshot')
+    text = content[-1]['text']
+    check(ANSWER in text and 'Russian' in text, 'answer/prompt missing')
+    shot(sh, 'factcheck.png')
+
+
+def t_factcheck_silent_when_correct(sh):
+    _factcheck(sh, 'ok')
+    capture(sh, 100, 100, 300, 200)
+    fc = _checked(sh)
+    check(not fc['significant'], fc)
+    time.sleep(0.3)
+    check('Opus 5.5:' not in menu_text(sh), 'nothing must be shown')
+
+
+def t_factcheck_off(sh):
+    capture(sh, 100, 100, 300, 200)   # factcheck=false in mock runs
+    Mock.wait_idle()
+    time.sleep(0.5)
+    check(not _check_calls(), 'fact-check ran although switched off')
+
+
+def t_factcheck_checks_followups_with_history(sh):
+    _factcheck(sh, 'ok')
+    capture(sh, 100, 100, 300, 200)
+    _checked(sh, 0)
+    (Path(os.environ['ZT_FAKE_DIR']) / 'factcheck').write_text('error')
+    followup(sh, 'und Plural?')
+    fc = _checked(sh, 1)
+    check(fc['significant'], fc)
+    text = json.loads(_check_calls()[-1]['stdin'])['message']['content'][-1]['text']
+    check(f'Assistant: {ANSWER}' in text and 'User: und Plural?' in text and
+          'Antwort 2' in text, f'history missing: {text!r}')
+    wait_for(lambda: 'Opus 5.5:' in menu_text(sh), 5, 'not shown')
+
+
+def t_factcheck_skips_strong_and_cli_answers(sh):
+    _factcheck(sh, 'error')
+    capture(sh, 100, 100, 300, 200)
+    _checked(sh)
+    press_strong(sh)                      # Opus answer: no check
+    wait_state(sh, lambda s: s['turns'][0].get('model'), timeout=8)
+    time.sleep(0.5)
+    check(len(_check_calls()) == 1, 'strong answer was fact-checked')
+    use_cli(sh)                           # CLI entry: no check
+    capture(sh, 100, 100, 320, 200)
+    time.sleep(0.5)
+    check(len(_check_calls()) == 1, 'CLI answer was fact-checked')
+
+
+def t_factcheck_dropped_when_answer_replaced(sh):
+    _factcheck(sh, 'slow')                # 3 s
+    capture(sh, 100, 100, 300, 200)
+    press_strong(sh)                      # replaces turn 0 meanwhile
+    wait_state(sh, lambda s: s['turns'][0].get('model'), timeout=8)
+    time.sleep(3.5)
+    turn = state(sh)['turns'][0]
+    check('factcheck' not in turn, f'stale fact-check applied: {turn}')
+
+
+def t_factcheck_failure_is_silent(sh):
+    _factcheck(sh, 'crash')
+    s = capture(sh, 100, 100, 300, 200)
+    time.sleep(1.0)
+    check(s['status'] == 'ok' and 'factcheck' not in state(sh)['turns'][0],
+          'a failed check must change nothing')
+    check('Opus 5.5:' not in menu_text(sh), 'nothing must be shown')
+
+
+def t_factcheck_survives_reload(sh):
+    _factcheck(sh, 'error')
+    capture(sh, 100, 100, 300, 200)
+    _checked(sh)
+    reload_extension(sh)
+    sh.js('zt.inst()._indicator.menu.open(0); await zt.sleep(200);')
+    check('«ест», а не «пьёт»' in menu_text(sh), 'correction lost on reload')
+
+
+
+def t_cli_large_stdin_arrives_intact(sh):
+    """>1 MB of images through the non-blocking stdin pipe, byte-exact."""
+    noise_background(sh, 'noise3.png')
+    use_cli(sh)
+    s = capture(sh, 100, 100, 700, 500)
+    check(s['status'] == 'ok', s)
+    stdin = fake_calls()[0]['stdin']
+    check(len(stdin) > 1_000_000, f'only {len(stdin)} bytes: test too small')
+    images = [b for b in json.loads(stdin)['message']['content']
+              if b['type'] == 'image']
+    e = sh.js('const e = zt.inst()._history.entries[0]; '
+              'return [e.contextPath, e.imagePath];')
+    for block, path in zip(images, e):
+        check(base64.b64decode(block['source']['data']) ==
+              Path(path).read_bytes(), f'{path}: bytes differ')
+
+
 SCENARIOS = [v for k, v in list(globals().items()) if k.startswith('t_')]

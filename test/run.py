@@ -146,12 +146,15 @@ def main():
         key = key_file.read_text().strip()
         key_file.unlink()
         settings = {'claude-api-key': f"'{key}'", 'backend': "'api'"}
+        if os.environ.get('ZT_FACTCHECK') == '0':   # A/B timing
+            settings['factcheck'] = 'false'
         todo = [scenarios.t_loads, live_scenarios.live_api]
     else:
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         settings = {'claude-api-key': "'test-key'",
                     'backend': "'api'",
+                    'factcheck': 'false',   # on only in its own scenarios
                     'claude-path': f"'{harness.FAKE_CLAUDE}'",
                     'api-base-url':
                         f"'http://127.0.0.1:{server.server_port}'"}
