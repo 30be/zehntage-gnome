@@ -9,7 +9,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-import {imageBlock, readAll} from './claude.js';
+import {readAll} from './claude.js';
 
 Gio._promisify(Gio.Subprocess.prototype, 'wait_async');
 Gio._promisify(Gio.OutputStream.prototype, 'write_all_async');
@@ -44,21 +44,23 @@ export class CliClient {
     }
 
     /**
-     * @param {object} req {model, system, image: {bytes, mediaType},
-     *   turns: [{question?, answer}], question?, effort?} (effort overrides
-     *   the setting: the [Opus] button)
+     * @param {object} req {model, system, content: the screenshot message
+     *   blocks, turns: [{question?, answer}], question?, effort?} (effort
+     *   overrides the setting: the [Opus] button)
      * @param {Function} [onText] called with the answer text so far
      * @returns {Promise<{text: string}>}
      */
-    async send({model, system, image, turns, question, effort},
+    async send({model, system, content: screenshot, turns, question, effort,
+        suffix = ''},
         onText = null) {
         const bin = this._binary;
         if (!bin)
             throw new Error('claude CLI not found');
 
-        const content = [imageBlock(image.bytes, image.mediaType)];
+        const content = [...screenshot];
         if (question)
-            content.push({type: 'text', text: transcript(turns, question)});
+            content.push({type: 'text',
+                text: transcript(turns, question, suffix)});
         const input = `${JSON.stringify({
             type: 'user',
             message: {role: 'user', content},
@@ -171,7 +173,7 @@ async function readStream(stream, onText) {
 }
 
 /** Follow-up prompt for a stateless call: prior Q&A, then the question. */
-function transcript(turns, question) {
+function transcript(turns, question, suffix) {
     const lines = ['Conversation so far about this screenshot:'];
     for (const turn of turns) {
         if (turn.question)
@@ -179,5 +181,7 @@ function transcript(turns, question) {
         lines.push(`You: ${turn.answer}`);
     }
     lines.push('', `New question: ${question}`);
+    if (suffix)
+        lines.push(suffix);
     return lines.join('\n');
 }

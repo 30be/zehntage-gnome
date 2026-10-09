@@ -1,8 +1,10 @@
 # zehntage-gnome
 
 Screen assistant for GNOME Shell 50. Press the hotkey, drag a rectangle over
-anything on screen, and Claude (Haiku 5.5, effort `low`) explains it. The
-answer streams into a top-bar popup, with history and follow-up questions.
+anything on screen, and Claude (Haiku 5.5, effort `low`) explains it — with
+the whole screen as context: Claude gets the monitor with your selection
+outlined in red, plus the selection at full resolution. The answer streams
+into a top-bar popup, with history and follow-up questions.
 
 Two backends:
 
@@ -29,8 +31,8 @@ without relogin. The dev shell shares your real extension dir and dconf.
 - `<Super>z` (configurable, several accelerators allowed, e.g.
   `<Super>z, XF86Favorites`): the screen freezes and dims.
   - drag: explain that area (a thin drag, e.g. underlining a line, grabs
-    that line)
-  - single click: explain the whole screen
+    that line), read in the context of the whole monitor
+  - single click: explain the whole monitor under the pointer
   - Escape / right click: cancel
 - The popup opens with "Thinking…", then the answer streams in (basic
   Markdown).
@@ -49,14 +51,29 @@ without relogin. The dev shell shares your real extension dir and dconf.
 
 - Claude: backend (`api` / `cli`), claude CLI path (`~` works), API key
   (platform.claude.com), model (default `claude-haiku-5-5`), effort
-  (default `low`), streaming (default on), thinking (default off).
+  (default `low`), whole screen as context (default on), streaming
+  (default on), thinking (default off).
 - Opus button: model (default `claude-opus-5-5`), effort (default `high`).
-- Prompt, hotkeys (applied on Enter), history size (default 20).
+- Prompt, follow-up suffix (default `(ответ по-русски)`, appended to
+  follow-up questions: without it Haiku answers in the question's
+  language), hotkeys (applied on Enter), history size (default 20).
 - Hidden: `cli-timeout` (default 60 s), `api-base-url` (tests).
 
 ```nu
 gsettings --schemadir ~/.local/share/gnome-shell/extensions/zehntage-gnome@lyka/schemas set org.gnome.shell.extensions.zehntage-gnome capture-hotkey "['<Super>z', 'XF86Favorites']"
 ```
+
+### What Claude gets
+
+For a drag, the first message is: "Image 1: the whole screen; the red
+rectangle (x, y, width, height in pixels of this image) marks the selected
+region", the monitor (downscaled to 1568 px, JPEG) with a crimson frame
+drawn just outside the selection, then "Image 2: the selected region at full
+resolution" and the crop. The system prompt says to explain what is inside
+the rectangle and use the rest only to understand it. Measured on Haiku
+5.5: ~1850 more input tokens but no slower to the first word, and answers
+read the selection in its sentence (one word: "frisst — ест (о животных)…
+Das Eichhörnchen frisst Nüsse"). A click sends just the monitor.
 
 ### Why it is fast
 
@@ -67,6 +84,9 @@ API backend (each measured on Haiku 5.5):
 - streamed SSE, rendered token by token into one live label.
 - the TLS connection is opened while you are still selecting, and the
   request reuses it (libsoup needs the POST marked idempotent for that).
+- the monitor is captured while you are still dragging (GNOME's
+  `composite_to_stream` always PNG-encodes: ~0.65 s for a 1080p monitor);
+  after release only cropping, the frame and a JPEG remain (~65 ms).
 - captures over 300 KB go out as JPEG (a full 1568 px screen: ~1 MB PNG vs
   ~80 KB JPEG, ~0.25 s faster). Small crops stay PNG.
 - the prompt asks for at most 3 short lines: output tokens are most of

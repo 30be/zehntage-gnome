@@ -42,6 +42,10 @@
       <default>true</default>
       <summary>API backend: stream the answer as it is written</summary>
     </key>
+    <key name="context" type="b">
+      <default>true</default>
+      <summary>Also send the whole screen, selection outlined in red</summary>
+    </key>
     <key name="thinking" type="b">
       <default>false</default>
       <summary>API backend: let the model think (about 0.4 s slower)</summary>
@@ -70,8 +74,12 @@
       <summary>Hotkeys that start a capture</summary>
     </key>
     <key name="system-prompt" type="s">
-      <default>'The image is a region of the user\'s screen they want explained. The user is a native Russian speaker, fluent in English, learning German. Answer in Russian, at most 3 short lines, no preamble. German text: give the translation, plus one note on a notable word or grammar point only if useful. Light Markdown (bold), no tables, no headings.'</default>
+      <default>'Always answer in Russian (по-русски), whatever language the screen or the question is in. The user selected part of their screen. You get the whole screen for context, with the selected region outlined by a red rectangle, and that region at full resolution (or a single image when they captured the whole screen). Explain what is inside the rectangle; use the rest of the screen only to understand it; follow-up questions are about the region too. Answer directly, never think out loud. The user is a native Russian speaker, fluent in English, learning German. German text: translate it into Russian, plus one note on a notable word or grammar point only if useful. At most 3 short lines, no preamble. Light Markdown (bold), no tables, no headings.'</default>
       <summary>System prompt sent with every screenshot</summary>
+    </key>
+    <key name="followup-suffix" type="s">
+      <default>'(ответ по-русски)'</default>
+      <summary>Appended to follow-up questions (models mirror the question's language otherwise)</summary>
     </key>
     <key name="history-size" type="i">
       <default>20</default>

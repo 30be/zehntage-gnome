@@ -36,6 +36,7 @@ export class History {
             DEFAULT_MODEL;
         entry.system ??= this._settings.get_string('system-prompt');
         entry.mediaType ??= 'image/png';
+        entry.suffix ??= ''; // keep older conversations byte-identical
         entry.turns = (entry.turns ?? []).filter(t =>
             !String(t.answer ?? '').startsWith('⚠'));
         // v2.1 names and in-flight state that used to be saved.
@@ -120,31 +121,43 @@ export class History {
     /**
      * Stores the screenshot and returns the new entry.
      *
-     * @param {object} shot {bytes, mediaType}
-     * @param {object} meta {backend, model, system} pinned for the whole
-     *   conversation
+     * @param {object} shot {focus: {bytes, mediaType}, context: {bytes,
+     *   mediaType, rect} | null} (see AreaSelector.select)
+     * @param {object} meta {backend, model, system, suffix} pinned for the
+     *   whole conversation
      */
-    addEntry(shot, {backend, model, system}) {
+    addEntry(shot, {backend, model, system, suffix}) {
         const id = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-        const ext = shot.mediaType === 'image/jpeg' ? 'jpg' : 'png';
-        const imagePath = GLib.build_filenamev([this._dir, `${id}.${ext}`]);
-        GLib.file_set_contents(imagePath, shot.bytes);
+        const path = (name, image) => {
+            const ext = image.mediaType === 'image/jpeg' ? 'jpg' : 'png';
+            const file = GLib.build_filenamev([this._dir, `${name}.${ext}`]);
+            GLib.file_set_contents(file, image.bytes);
+            return file;
+        };
+        const imagePath = path(id, shot.focus);
 
         const entry = {
             id,
             time: new Date().toISOString(),
             imagePath,
-            mediaType: shot.mediaType,
+            mediaType: shot.focus.mediaType,
+            // Whole monitor with the selection outlined, for context.
+            ...shot.context ? {
+                contextPath: path(`${id}.ctx`, shot.context),
+                contextMediaType: shot.context.mediaType,
+                rect: shot.context.rect,
+            } : {},
             backend,
             model,
             system,
+            suffix,
             turns: [],          // [{question?, answer, content?, model?}]
             status: 'pending',  // pending | ok | error
             error: null,
         };
         try {
             const loader = new GdkPixbuf.PixbufLoader();
-            loader.write_bytes(new GLib.Bytes(shot.bytes));
+            loader.write_bytes(new GLib.Bytes(shot.focus.bytes));
             loader.close();
             const full = loader.get_pixbuf();
             const k = Math.min(1, THUMB_W / full.get_width(),
@@ -167,7 +180,8 @@ export class History {
         const cap = Math.max(1, this._settings.get_int('history-size'));
         while (this.entries.length > cap) {
             const old = this.entries.pop();
-            for (const path of [old.imagePath, old.thumbPath]) {
+            for (const path of [old.imagePath, old.thumbPath,
+                old.contextPath]) {
                 try {
                     if (path)
                         Gio.File.new_for_path(path).delete(null);
@@ -178,8 +192,10 @@ export class History {
         }
     }
 
-    loadImageBytes(entry) {
-        const [ok, data] = GLib.file_get_contents(entry.imagePath);
+    /** Bytes of the focus image, or of the context image. */
+    loadImageBytes(entry, context = false) {
+        const [ok, data] = GLib.file_get_contents(
+            context ? entry.contextPath : entry.imagePath);
         if (!ok)
             throw new Error('Screenshot file missing');
         return data;

@@ -205,7 +205,7 @@ def main():
         for line in errs[:40]:
             print('   ', line)
     ok = not failed and not errs
-    if ok:
+    if ok and not os.environ.get('ZT_KEEP'):   # ZT_KEEP=1: keep the logs
         shutil.rmtree(tmp, ignore_errors=True)   # incl. any key in keyfile
         where = ''
     else:

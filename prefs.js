@@ -63,6 +63,9 @@ export default class ZehntagePreferences extends ExtensionPreferences {
         claude.add(comboRow('Effort', 'effort', EFFORTS, {
             subtitle: 'How much the model thinks; low is fastest',
         }));
+        claude.add(switchRow('Whole screen as context', 'context',
+            'Send the monitor with the selection outlined in red, plus the ' +
+            'selection itself'));
         claude.add(switchRow('Streaming', 'stream',
             'API backend only. Show the answer while it is written'));
         claude.add(switchRow('Thinking', 'thinking',
@@ -88,6 +91,10 @@ export default class ZehntagePreferences extends ExtensionPreferences {
             child: promptView,
             has_frame: true,
         }));
+        const suffixGroup = group('Follow-up suffix',
+            'Appended to follow-up questions; keeps answers in your ' +
+            'language when you ask in another one. Empty: none.');
+        suffixGroup.add(entryRow('Suffix', 'followup-suffix'));
 
         const behaviour = group('Behaviour');
         // Applied on Enter / apply button only: writing on every keystroke

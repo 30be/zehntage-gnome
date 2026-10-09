@@ -321,7 +321,9 @@ class ZehntageIndicator extends PanelMenu.Button {
         });
         b.connect('clicked', () => {
             this.menu.close();
-            const uri = Gio.File.new_for_path(entry.imagePath).get_uri();
+            // The context (selection outlined) if there is one.
+            const uri = Gio.File.new_for_path(
+                entry.contextPath ?? entry.imagePath).get_uri();
             try {
                 Gio.AppInfo.launch_default_for_uri(uri, null);
             } catch (e) {

@@ -13,7 +13,9 @@ import time
 from pathlib import Path
 
 from harness import *  # noqa: F401,F403  (helpers, Mock, constants)
-from harness import (ANSWER, REAL_HISTORY, ROOT, UUID, GLib, Mock,  # noqa
+from harness import (OUT, context_image, first_content, monitor_at,  # noqa
+                     monitor_px, red)
+from harness import (SUFFIX, ANSWER, REAL_HISTORY, ROOT, UUID, GLib, Mock,  # noqa
                      argval, capture, check, cyan, data_dir, decode_png,
                      entries, fake_calls, followup, full_px, hotkey,
                      labels, last_image, magenta, menu_text, noise_background,
@@ -68,9 +70,8 @@ def t_drag_select_sends_and_shows_answer(sh):
     for bad in ('temperature', 'top_p', 'top_k'):
         check(bad not in b, f'{bad} must not be sent to Haiku 5.5')
     check('Russian' in b['system'], 'system prompt missing')
-    img = b['messages'][0]['content'][0]
-    check(img['type'] == 'image' and
-          img['source']['media_type'] == 'image/png', img['type'])
+    img = last_image()
+    check(img['source']['media_type'] == 'image/png', img['source'])
     size = png_size(img['source']['data'])
     exp = (span(sh, x - 10, x + w + 10), span(sh, y - 10, y + h + 10))
     check(size == exp, f'crop size {size} != {exp}')
@@ -94,9 +95,11 @@ def t_click_captures_full_screen(sh):
     sw, shh = stage_size(sh)
     sh.js(f'await zt.click({sw // 2}, {shh // 2});')
     wait_state(sh, lambda s: s['status'] == 'ok')
-    img = Mock.requests[0]['body']['messages'][0]['content'][0]
-    check(png_size(img['source']['data']) == full_px(sh),
-          f"{png_size(img['source']['data'])} != full {full_px(sh)}")
+    content = first_content()
+    check(len(content) == 1, 'a click sends one image, no context')
+    want = monitor_px(sh, sw // 2, shh // 2)
+    check(png_size(content[0]['source']['data']) == want,
+          f"{png_size(content[0]['source']['data'])} != monitor {want}")
 
 
 def t_followup_typed_is_append_only(sh):
@@ -119,7 +122,7 @@ def t_followup_typed_is_append_only(sh):
     check(msgs[1]['content'][0] == {'type': 'thinking', 'thinking': '',
                                     'signature': 'sig1'},
           'thinking block must be replayed verbatim')
-    check(msgs[2]['content'] == 'und Plural?', msgs[2]['content'])
+    check(msgs[2]['content'] == 'und Plural?' + SUFFIX, msgs[2]['content'])
     check(second['system'] == first['system'], 'system changed')
     check('Antwort 2' in menu_text(sh), 'second answer not shown')
     shot(sh, 'followup.png')
@@ -252,8 +255,10 @@ def t_cli_drag_sends_fast_flags(sh):
     check(env.get('DISABLE_AUTOUPDATER') == '1' and
           env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC') == '1', env)
     msg = json.loads(calls[0]['stdin'])
-    img = msg['message']['content'][0]
-    check(msg['type'] == 'user' and img['type'] == 'image', msg['type'])
+    images = [b for b in msg['message']['content'] if b['type'] == 'image']
+    check(msg['type'] == 'user' and len(images) == 2,
+          'cli gets context + selection')
+    img = images[-1]
     check(png_size(img['source']['data']) ==
           (span(sh, 100, 400), span(sh, 100, 260)), 'crop size')
     check('белка (cli)' in menu_text(sh), 'cli answer not shown')
@@ -272,8 +277,9 @@ def t_cli_followup_carries_transcript(sh):
     calls = fake_calls()
     check(len(calls) == 2, f'{len(calls)} cli calls')
     content = json.loads(calls[1]['stdin'])['message']['content']
-    check(content[0]['type'] == 'image', 'image missing in follow-up')
-    text = content[1]['text']
+    check(sum(b['type'] == 'image' for b in content) == 2,
+          'images missing in follow-up')
+    text = content[-1]['text']
     check('белка (cli)' in text and 'New question: und Plural?' in text,
           text)
     check('CLI Antwort 2' in menu_text(sh), 'follow-up answer not shown')
@@ -361,8 +367,9 @@ def t_drag_to_screen_edges(sh):
 
 def t_tiny_drag_is_full_screen(sh):
     capture(sh, 300, 300, 302, 302)
-    check(png_size(last_image()['source']['data']) == full_px(sh),
-          'tiny drag should capture the whole screen')
+    check(png_size(last_image()['source']['data']) ==
+          monitor_px(sh, 301, 301) and context_image() is None,
+          'tiny drag should capture the monitor, as a click')
 
 
 def t_menu_not_in_capture(sh):
@@ -376,12 +383,13 @@ def t_menu_not_in_capture(sh):
     sh.js('zt.inst()._indicator.menu._getMenuItems()[0].activate('
           'zt.Clutter.get_current_event());')
     wait_state(sh, lambda s: s['selector'])
-    sw, shh = stage_size(sh)
-    sh.js(f'await zt.click({sw // 2}, {shh // 2});')
+    # Click on the menu's monitor: that monitor is captured.
+    ox, oy, ow, oh = monitor_at(sh, mx + mw // 2, my + mh // 2)
+    sh.js(f'await zt.click({ox + ow // 2}, {oy + oh // 2});')
     wait_state(sh, lambda s: s['status'] == 'ok')
     w, h, pix = decode_png(last_image()['source']['data'])
-    k = w / px(sh, sw)[0]
-    cx, cy = px(sh, mx + mw // 2, my + mh // 2)
+    k = w / span(sh, ox, ox + ow)
+    cx, cy = (span(sh, ox, mx + mw // 2), span(sh, oy, my + mh // 2))
     check(magenta(pix(int(cx * k), int(cy * k))),
           'the popup menu leaked into the frozen screenshot')
 
@@ -607,7 +615,8 @@ def t_followup_error_then_recovers(sh):
     check(not s['followUpError'], 'stale follow-up error')
     msgs = Mock.requests[2]['body']['messages']
     check([m['role'] for m in msgs] == ['user', 'assistant', 'user'] and
-          msgs[2]['content'] == 'q2', f'failed q1 leaked into history: {msgs}')
+          msgs[2]['content'] == 'q2' + SUFFIX,
+          f'failed q1 leaked into history: {msgs}')
 
 
 # ----- settings / backends
@@ -648,10 +657,15 @@ def t_cli_garbage_output(sh):
 def t_cli_hang_is_killed_on_timeout(sh):
     sh.gset('cli-timeout', '2')
     use_cli(sh, 'hang')
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    sh.js('await zt.drag(100, 100, 200, 200);')
+    # From the moment the request starts (a 4K capture alone takes ~3 s).
+    wait_state(sh, lambda s: s['busy'], timeout=15)
     t0 = time.time()
-    s = capture(sh, 100, 100, 200, 200)
-    check(s['status'] == 'error' and 'timed out' in s['error'], s)
-    check(time.time() - t0 < 6, f'took {time.time() - t0:.1f}s')
+    s = wait_state(sh, lambda s: s['status'] == 'error', timeout=15)
+    check('timed out' in s['error'], s)
+    check(time.time() - t0 < 4, f'timeout took {time.time() - t0:.1f}s')
     pid = int((Path(os.environ['ZT_FAKE_DIR']) / 'hang.pid').read_text())
 
     def gone():
@@ -699,7 +713,7 @@ def t_legacy_entry_uses_current_backend(sh):
     check(not s['followUpError'], s['followUpError'])
     calls = fake_calls()
     check(len(calls) == 2, f'follow-up went elsewhere: {len(calls)} cli calls')
-    text = json.loads(calls[1]['stdin'])['message']['content'][1]['text']
+    text = json.loads(calls[1]['stdin'])['message']['content'][-1]['text']
     check('gemini says hi' in text and '⚠' not in text, text)
 
 
@@ -720,9 +734,11 @@ def t_real_user_history_copy(sh):
     dst = data_dir()
     data = json.loads(src.read_text())
     for e in data:
-        name = Path(e['imagePath']).name
-        shutil.copy(REAL_HISTORY / name, dst / name)
-        e['imagePath'] = str(dst / name)   # never point at the real files
+        for key in ('imagePath', 'contextPath'):   # never point at the
+            if e.get(key):                         # real files
+                name = Path(e[key]).name
+                shutil.copy(REAL_HISTORY / name, dst / name)
+                e[key] = str(dst / name)
         e.pop('thumbPath', None)           # (v2 adds these; regenerate)
     leaks = [v for e in data for v in e.values()
              if isinstance(v, str) and v.startswith(str(REAL_HISTORY))]
@@ -749,7 +765,10 @@ def t_real_user_history_copy(sh):
         tw, th = png_size(base64.b64encode(Path(t).read_bytes()))
         check(tw <= 640 and th <= 280, f'thumbnail too big: {tw}x{th}')
         check(str(t).startswith(str(dst)), f'thumbnail outside test dir: {t}')
-    check(all(e['backend'] == 'cli' and e['model'] for e in es), 'migration')
+    # Gemini-era entries adopt the current backend; v2 ones keep theirs.
+    want = [src_e.get('backend', 'cli') for src_e in data]
+    check([e['backend'] for e in es] == want and all(e['model'] for e in es),
+          f'migration: {[e["backend"] for e in es]} vs {want}')
     t0 = time.time()
     sh.js('zt.inst()._indicator.menu.open(0); await zt.sleep(300);')
     opened = time.time() - t0
@@ -811,7 +830,8 @@ def t_followup_draft_survives_pending_and_rerender(sh):
     sh.js("zt.inst()._indicator._focusTarget?.grab_key_focus(); "
           "await zt.chord(zt.Clutter.KEY_Return);")
     wait_state(sh, lambda s: len(s['turns'] or []) == 3)
-    check(Mock.requests[2]['body']['messages'][-1]['content'] == 'zweite',
+    check(Mock.requests[2]['body']['messages'][-1]['content'] ==
+          'zweite' + SUFFIX,
           'draft not sent')
     check(_followup_text(sh) == '', 'field not cleared after sending')
 
@@ -963,7 +983,7 @@ def t_streaming_shows_partial_answer(sh):
     sh.js('await zt.drag(100, 100, 300, 200);')
     end = time.time() + 5
     text = wait_for(lambda: (lambda t: t if 'ERSTER' in t else None)(
-        menu_text(sh)), 5, 'no partial answer')
+        menu_text(sh)), 10, 'no partial answer')   # 4K capture ~3 s
     check('ERSTER' in text and 'DRITTER' not in text,
           f'no partial answer while streaming: {text!r}')
     check(state(sh)['status'] == 'pending', 'should still be pending')
@@ -1156,8 +1176,7 @@ def t_opus_button_rewrites_answer(sh):
     check(b['output_config'] == {'effort': 'high'}, b['output_config'])
     check('thinking' not in b, 'Opus 5.5: thinking must stay adaptive')
     check(b['max_tokens'] >= 16000, b['max_tokens'])
-    check(len(b['messages']) == 1 and
-          b['messages'][0]['content'][0]['type'] == 'image', b['messages'])
+    check(len(b['messages']) == 1 and last_image(1), b['messages'])
     check(len(s['turns']) == 1 and s['turns'][0]['answer'] == '**Opus** 2',
           s['turns'])
     text = menu_text(sh)
@@ -1183,7 +1202,7 @@ def t_opus_rewrites_last_followup(sh):
     s = wait_state(sh, lambda s: s['turns'][-1].get('model'), timeout=8)
     msgs = Mock.requests[2]['body']['messages']
     check([m['role'] for m in msgs] == ['user', 'assistant', 'user'] and
-          msgs[2]['content'] == 'Plural?', msgs)
+          msgs[2]['content'] == 'Plural?' + SUFFIX, msgs)
     check(s['turns'][0]['answer'] == ANSWER and
           s['turns'][1] == {'question': 'Plural?', 'answer': '**Opus** 3',
                             'content': s['turns'][1]['content'],
@@ -1286,7 +1305,8 @@ def t_opus_answers_failed_followup(sh):
     msgs = Mock.requests[2]['body']['messages']
     check(Mock.requests[2]['body']['model'] == 'claude-opus-5-5', 'model')
     check([m['role'] for m in msgs] == ['user', 'assistant', 'user'] and
-          msgs[2]['content'] == 'q-failed', f'wrong question asked: {msgs}')
+          msgs[2]['content'] == 'q-failed' + SUFFIX,
+          f'wrong question asked: {msgs}')
     check(s['turns'][0]['answer'] == ANSWER, 'first answer must stay')
     check(s['turns'][1]['question'] == 'q-failed' and
           s['turns'][1]['model'] == 'claude-opus-5-5', s['turns'][1])
@@ -1341,6 +1361,120 @@ def t_utf8_intact_without_streaming(sh):
         got = s['turns'][0]['answer']
         check(got == answer, f'answer corrupted ({got.count(chr(0xfffd))} '
               f'replacement chars, {len(got)} vs {len(answer)} chars)')
+
+
+# ----- whole screen as context, selection outlined in red
+
+def t_context_image_outlines_selection(sh):
+    # Select 4 px inside the magenta box (fractional scales blur the edge
+    # pixel), so the focus image must be magenta to the corners.
+    bx, by, bw, bh = 400, 300, 160, 70
+    sh.js(f'zt.box({bx - 4}, {by - 4}, {bw + 8}, {bh + 8});')
+    capture(sh, bx, by, bx + bw, by + bh)
+    content = first_content()
+    check([b['type'] for b in content] == ['text', 'image', 'text', 'image'],
+          [b['type'] for b in content])
+    ctx = context_image()
+    cw, ch, pix = decode_png(ctx['source']['data'])
+    check((cw, ch) == monitor_px(sh, bx, by), f'context {cw}x{ch}')
+    import re
+    m = re.search(r'x=(\d+), y=(\d+), width=(\d+), height=(\d+)',
+                  content[0]['text'])
+    check(m, f'no coordinates in: {content[0]["text"]!r}')
+    x, y, w, h = map(int, m.groups())
+    # Inside: the magenta box (content not covered); just outside: red.
+    check(magenta(pix(x + w // 2, y + h // 2)), 'rect does not match box')
+    check(magenta(pix(x + 2, y + 2)), 'frame covers the selection')
+    for px_, py_ in ((x + w // 2, y - 3), (x + w // 2, y + h + 2),
+                     (x - 3, y + h // 2), (x + w + 2, y + h // 2)):
+        check(red(pix(px_, py_)), f'no red frame at {px_},{py_}: '
+              f'{pix(px_, py_)}')
+    fw, fh, fpix = decode_png(last_image()['source']['data'])
+    check((fw, fh) == (span(sh, bx, bx + bw), span(sh, by, by + bh)) and
+          magenta(fpix(0, 0)) and magenta(fpix(fw - 1, fh - 1)),
+          f'focus {fw}x{fh} vs {(span(sh, bx, bx + bw), span(sh, by, by + bh))}, '
+          f'corners {fpix(0, 0)} {fpix(fw - 1, fh - 1)}')
+    check('red rectangle' in Mock.requests[0]['body']['system'],
+          'system prompt does not explain the rectangle')
+    shot(sh, 'context.png')
+    (OUT / 'sent-context.jpg').write_bytes(
+        base64.b64decode(ctx['source']['data']))   # what Claude gets
+    # Thumbnails/history keep both images; follow-ups resend both.
+    followup(sh, 'und?')
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    check(first_content(1) == content, 'follow-up changed the screenshot')
+
+
+def t_context_on_the_selections_monitor(sh):
+    mons = sh.js('return zt.Main.layoutManager.monitors.map('
+                 'm => [m.x, m.y, m.width, m.height]);')
+    mx, my, mw, mh = mons[-1]
+    capture(sh, mx + 50, my + 100, mx + 250, my + 180)
+    cw, ch = png_size(context_image()['source']['data'])
+    check((cw, ch) == monitor_px(sh, mx + 60, my + 110),
+          f'context {cw}x{ch} is not that monitor')
+
+
+def t_context_setting_off(sh):
+    sh.gset('context', 'false')
+    capture(sh, 100, 100, 300, 200)
+    content = first_content()
+    check(len(content) == 1 and content[0]['type'] == 'image',
+          'context off: only the selection')
+    check(png_size(content[0]['source']['data']) ==
+          (span(sh, 100, 300), span(sh, 100, 200)), 'selection size')
+
+
+def t_context_image_saved_with_entry(sh):
+    capture(sh, 100, 100, 300, 200)
+    e = sh.js('const e = zt.inst()._history.entries[0]; '
+              'return [e.contextPath, e.rect, e.contextMediaType];')
+    check(e[0] and Path(e[0]).exists() and len(e[1]) == 4 and
+          e[2] == 'image/jpeg', f'context not stored: {e}')
+
+
+
+
+def t_one_word_selection(sh):
+    """Select one word of a sentence: the focus image must show that word
+    (white text on the fixture's dark background), not the wallpaper."""
+    sh.js("return zt.fixture('Das Eichhörnchen frisst Nüsse');")
+    wx, wy, ww, wh = sh.js('''
+        const t = zt._fixture.clutter_text, l = t.get_layout();
+        const bytes = s => new TextEncoder().encode(s).length;
+        const a = l.index_to_pos(bytes('Das Eichhörnchen '));
+        const b = l.index_to_pos(bytes('Das Eichhörnchen frisst'));
+        const [x, y] = t.get_transformed_position();
+        // Pango units, at the text's resource scale (2 on a 1.25 monitor).
+        const u = 1024 * t.get_resource_scale();
+        return [x + a.x / u, y + a.y / u, (b.x - a.x) / u,
+                a.height / u].map(Math.round);''')
+    capture(sh, wx - 2, wy, wx + ww + 2, wy + wh)
+    (OUT / 'one-word-focus.png').write_bytes(
+        base64.b64decode(last_image()['source']['data']))
+    (OUT / 'one-word-context.jpg').write_bytes(
+        base64.b64decode(context_image()['source']['data']))
+    w, h, pix = decode_png(last_image()['source']['data'])
+    pixels = [pix(x, y) for x in range(0, w, 3) for y in range(0, h, 3)]
+    white = sum(min(p) > 200 for p in pixels)
+    dark = sum(max(p) < 60 for p in pixels)
+    check(white > 10 and dark > len(pixels) // 3,
+          f'focus is not the word: {white} white, {dark} dark of '
+          f'{len(pixels)} at {(wx, wy, ww, wh)}')
+
+
+
+def t_followup_suffix_pinned_and_legacy_free(sh):
+    capture(sh, 100, 100, 200, 200)
+    sh.gset('followup-suffix', "'(answer in English)'")   # after capture
+    followup(sh, 'Wie ist der Plural?')
+    wait_state(sh, lambda s: len(s['turns'] or []) == 2)
+    sent = Mock.requests[1]['body']['messages'][-1]['content']
+    check(sent == 'Wie ist der Plural?' + SUFFIX,
+          f'suffix must be pinned at capture time: {sent!r}')
+    turns = state(sh)['turns']
+    check(turns[1]['question'] == 'Wie ist der Plural?',
+          'the suffix must not be stored or shown')
 
 
 SCENARIOS = [v for k, v in list(globals().items()) if k.startswith('t_')]

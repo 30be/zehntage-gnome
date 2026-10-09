@@ -3,6 +3,7 @@
 Not part of the mock suite: run.py runs them with --live / --live-cli.
 """
 
+import re
 import time
 
 from harness import (check, followup, hotkey, press_strong, reset,  # noqa
@@ -16,7 +17,8 @@ def live_api(sh):
         fx = sh.js("return zt.fixture('Das Eichhörnchen frisst Nüsse');")
         hotkey(sh)
         wait_state(sh, lambda s: s['selector'])
-        x, y, w, h = fx
+        time.sleep(0.8)   # a human takes this long to drag (the monitor is
+        x, y, w, h = fx   # captured meanwhile)
         sh.js(f'await zt.drag({x - 10}, {y - 10}, '
               f'{x + w + 10}, {y + h + 10});')
         t0 = time.time()
@@ -33,12 +35,35 @@ def live_api(sh):
         total = time.time() - t0
         s = state(sh)
         check(s['status'] == 'ok', s['error'])
-        check('белк' in s['turns'][0]['answer'].lower(), s['turns'][0])
+        check(re.search('бел(к|оч)', s['turns'][0]['answer'].lower()), s['turns'][0])
         first_t.append(first)
         total_t.append(total)
         print(f'    run {i + 1}: first words {first:.2f}s, done {total:.2f}s'
               f'  {s["turns"][0]["answer"][:60]!r}')
     shot(sh, 'live.png')
+    # One word only: the context (whole screen, red frame) should still let
+    # the model read it in its sentence.
+    reset(sh)
+    sh.js("return zt.fixture('Das Eichhörnchen frisst Nüsse');")
+    wx, wy, ww, wh = sh.js('''
+        const t = zt._fixture.clutter_text, l = t.get_layout();
+        const bytes = s => new TextEncoder().encode(s).length;
+        const a = l.index_to_pos(bytes('Das Eichhörnchen '));
+        const b = l.index_to_pos(bytes('Das Eichhörnchen frisst'));
+        const [x, y] = t.get_transformed_position();
+        // Pango units, at the text's resource scale (2 on a 1.25 monitor).
+        const u = 1024 * t.get_resource_scale();
+        return [x + a.x / u, y + a.y / u, (b.x - a.x) / u,
+                a.height / u].map(Math.round);''')
+    hotkey(sh)
+    wait_state(sh, lambda s: s['selector'])
+    time.sleep(0.8)
+    sh.js(f'await zt.drag({wx - 2}, {wy}, {wx + ww + 2}, {wy + wh});')
+    t0 = time.time()
+    s = wait_state(sh, lambda s: s['status'] in ('ok', 'error'), timeout=60)
+    check(s['status'] == 'ok', s['error'])
+    print(f'    one word ("frisst"), with context: {time.time() - t0:.2f}s  '
+          f'{s["turns"][0]["answer"][:110]!r}')
     t0 = time.time()
     sh.js("await zt.type('Wie ist der Plural?'); "
           "await zt.chord(zt.Clutter.KEY_Return);")
@@ -79,7 +104,8 @@ def live_cli(sh):
         sh.gset('backend', "'cli'")
         hotkey(sh)
         wait_state(sh, lambda s: s['selector'])
-        x, y, w, h = fx
+        time.sleep(0.8)   # a human takes this long to drag (the monitor is
+        x, y, w, h = fx   # captured meanwhile)
         sh.js(f'await zt.drag({x - 10}, {y - 10}, '
               f'{x + w + 10}, {y + h + 10});')
         t0 = time.time()
@@ -97,7 +123,7 @@ def live_cli(sh):
         s = state(sh)
         check(s['status'] == 'ok', s['error'])
         check(not s['overview'], f'overview opened in run {i + 1}')
-        check('белк' in s['turns'][0]['answer'].lower(),
+        check(re.search('бел(к|оч)', s['turns'][0]['answer'].lower()),
               f'answer does not mention the squirrel: {s["turns"][0]}')
         print(f'    run {i + 1}: first words {first:.2f}s, '
               f'done {times[-1]:.2f}s  '

@@ -40,6 +40,7 @@ REAL_HISTORY = REAL_HOME / '.local' / 'share' / 'zehntage-gnome@lyka'
 # --screens "1920x1080@1.25,1920x1080@1": monitors left to right, with scale.
 SCREENS = [(1280, 800, 1.0)]
 ANSWER = '**Eichhörnchen** — белка.\n\n- *das* Eichhörnchen, neutr.'
+SUFFIX = '\n\n(ответ по-русски)'   # default follow-up suffix, as sent
 
 # Foreign keys the harness sets in the test shell (besides SCHEMA).
 BASE_SETTINGS = {
@@ -553,8 +554,38 @@ def full_px(sh):
     return (round(w * k), round(h * k)) if k < 1 else (w, h)
 
 
+def first_content(i=-1):
+    return Mock.requests[i]['body']['messages'][0]['content']
+
+
 def last_image(i=-1):
-    return Mock.requests[i]['body']['messages'][0]['content'][0]
+    """The focus image (selection, or the whole monitor for a click)."""
+    return [b for b in first_content(i) if b['type'] == 'image'][-1]
+
+
+def context_image(i=-1):
+    """The whole-monitor context image, or None."""
+    images = [b for b in first_content(i) if b['type'] == 'image']
+    return images[0] if len(images) == 2 else None
+
+
+def monitor_at(sh, x, y):
+    return sh.js(f'''return (m => [m.x, m.y, m.width, m.height])(
+        zt.Main.layoutManager.monitors.find(m => {x} >= m.x &&
+            {x} < m.x + m.width && {y} >= m.y && {y} < m.y + m.height));''')
+
+
+def monitor_px(sh, x, y):
+    """Expected image size of the monitor under (x, y), downscaled."""
+    mx, my, mw, mh = monitor_at(sh, x, y)
+    w, h = span(sh, mx, mx + mw), span(sh, my, my + mh)
+    k = 1568 / max(w, h)
+    return (round(w * k), round(h * k)) if k < 1 else (w, h)
+
+
+def red(rgb):
+    r, g, b = rgb
+    return r > 170 and g < 80 and b < 100
 
 
 STATE = '''

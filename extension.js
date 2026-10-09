@@ -124,13 +124,16 @@ export default class ZehntageExtension extends Extension {
     /** Capture failures must be visible, not just logged. */
     async _select() {
         try {
-            const shot = await this._selector.select();
+            const shot = await this._selector.select({
+                context: this._settings.get_boolean('context'),
+            });
             if (!shot || !this._history)
                 return;
             const entry = this._history.addEntry(shot, {
                 backend: this._backend,
                 model: this._claude.model,
                 system: this._settings.get_string('system-prompt'),
+                suffix: this._settings.get_string('followup-suffix').trim(),
             });
             this._indicator.open();
             this._askInitial(entry);
@@ -254,13 +257,11 @@ export default class ZehntageExtension extends Extension {
         onText}) {
         const {model, effort, thinking} = strong ? this._strong
             : {model: entry.model};
-        const image = {
-            bytes: this._history.loadImageBytes(entry),
-            mediaType: entry.mediaType,
-        };
+        const screenshot = this._screenshotContent(entry);
         if (entry.backend === 'cli') {
             const {text} = await this._cli.send({model, effort,
-                system: entry.system, image, turns, question}, onText);
+                system: entry.system, content: screenshot, turns, question,
+                suffix: entry.suffix}, onText);
             return {text, model};
         }
         const {content, text} = await this._claude.send({
@@ -268,9 +269,33 @@ export default class ZehntageExtension extends Extension {
             effort,
             thinking,
             system: entry.system,
-            messages: this._messages(entry, image, turns, question, model),
+            messages: this._messages(entry, screenshot, turns, question,
+                model),
         }, onText);
         return {content, text, model};
+    }
+
+    /**
+     * The first user message: the whole monitor with the selection
+     * outlined in red (for context) plus the selection at full resolution;
+     * or just the one image for full-screen captures and older entries.
+     */
+    _screenshotContent(entry) {
+        const focus = imageBlock(this._history.loadImageBytes(entry),
+            entry.mediaType);
+        if (!entry.contextPath)
+            return [focus];
+        const [x, y, w, h] = entry.rect;
+        return [
+            {type: 'text', text: 'Image 1: the whole screen. The red ' +
+                `rectangle (x=${x}, y=${y}, width=${w}, height=${h} in ` +
+                'pixels of this image) marks the selected region.'},
+            imageBlock(this._history.loadImageBytes(entry, true),
+                entry.contextMediaType),
+            {type: 'text', text: 'Image 2: the selected region at full ' +
+                'resolution.'},
+            focus,
+        ];
     }
 
     /**
@@ -279,12 +304,15 @@ export default class ZehntageExtension extends Extension {
      * the question. Thinking blocks are bound to the model that wrote them,
      * so answers from another model (strong rewrites) go back as text.
      */
-    _messages(entry, image, turns, question, model) {
-        const messages = [{role: 'user',
-            content: [imageBlock(image.bytes, image.mediaType)]}];
+    _messages(entry, screenshot, turns, question, model) {
+        const messages = [{role: 'user', content: screenshot}];
+        // Follow-ups get the entry's suffix ("(ответ по-русски)"): without
+        // it Haiku answers in the question's language. Same text on every
+        // replay, so the history stays append-only.
+        const ask = q => entry.suffix ? `${q}\n\n${entry.suffix}` : q;
         for (const turn of turns) {
             if (turn.question)
-                messages.push({role: 'user', content: turn.question});
+                messages.push({role: 'user', content: ask(turn.question)});
             const sameModel = (turn.model ?? entry.model) === model;
             messages.push({
                 role: 'assistant',
@@ -293,7 +321,7 @@ export default class ZehntageExtension extends Extension {
             });
         }
         if (question)
-            messages.push({role: 'user', content: question});
+            messages.push({role: 'user', content: ask(question)});
         return messages;
     }
 }
